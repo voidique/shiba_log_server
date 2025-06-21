@@ -35,15 +35,15 @@ export const createPartitionTable = async () => {
       console.log(`📋 현재 사용 테이블: ${LEGACY_TABLE_NAME}`);
       
       // 기존 테이블에 인덱스만 추가
-      await sql`
-        CREATE INDEX IF NOT EXISTS idx_game_logs_timestamp ON ${sql(LEGACY_TABLE_NAME)}(timestamp)
-      `;
-      await sql`
-        CREATE INDEX IF NOT EXISTS idx_game_logs_type ON ${sql(LEGACY_TABLE_NAME)}(type)
-      `;
-      await sql`
-        CREATE INDEX IF NOT EXISTS idx_game_logs_level ON ${sql(LEGACY_TABLE_NAME)}(level)
-      `;
+      await sql.unsafe(`
+        CREATE INDEX IF NOT EXISTS idx_game_logs_timestamp ON ${LEGACY_TABLE_NAME}(timestamp)
+      `);
+      await sql.unsafe(`
+        CREATE INDEX IF NOT EXISTS idx_game_logs_type ON ${LEGACY_TABLE_NAME}(type)
+      `);
+      await sql.unsafe(`
+        CREATE INDEX IF NOT EXISTS idx_game_logs_level ON ${LEGACY_TABLE_NAME}(level)
+      `);
       
       console.log('✅ 기존 테이블 인덱스 설정 완료');
       return;
@@ -66,8 +66,8 @@ export const createPartitionTable = async () => {
     } else {
       // 새로운 파티션 테이블 생성
       console.log('🆕 새로운 파티션 테이블을 생성합니다');
-      await sql`
-        CREATE TABLE ${sql(PARTITIONED_TABLE_NAME)} (
+      await sql.unsafe(`
+        CREATE TABLE ${PARTITIONED_TABLE_NAME} (
           id BIGSERIAL,
           timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
           level VARCHAR(10) NOT NULL,
@@ -76,20 +76,20 @@ export const createPartitionTable = async () => {
           metadata JSONB,
           PRIMARY KEY (timestamp, id)
         ) PARTITION BY RANGE (timestamp)
-      `;
+      `);
       console.log('✅ 파티션 테이블 생성 완료');
     }
 
     // 파티션 테이블 인덱스 생성
-    await sql`
-      CREATE INDEX IF NOT EXISTS ${sql(`idx_${PARTITIONED_TABLE_NAME}_timestamp`)} ON ${sql(PARTITIONED_TABLE_NAME)}(timestamp)
-    `;
-    await sql`
-      CREATE INDEX IF NOT EXISTS ${sql(`idx_${PARTITIONED_TABLE_NAME}_type`)} ON ${sql(PARTITIONED_TABLE_NAME)}(type)
-    `;
-    await sql`
-      CREATE INDEX IF NOT EXISTS ${sql(`idx_${PARTITIONED_TABLE_NAME}_level`)} ON ${sql(PARTITIONED_TABLE_NAME)}(level)
-    `;
+    await sql.unsafe(`
+      CREATE INDEX IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_timestamp ON ${PARTITIONED_TABLE_NAME}(timestamp)
+    `);
+    await sql.unsafe(`
+      CREATE INDEX IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_type ON ${PARTITIONED_TABLE_NAME}(type)
+    `);
+    await sql.unsafe(`
+      CREATE INDEX IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_level ON ${PARTITIONED_TABLE_NAME}(level)
+    `);
 
     console.log('✅ 파티션 테이블 및 인덱스 설정 완료');
     console.log('📅 월별 파티션 생성을 시작합니다...');
@@ -153,11 +153,11 @@ export const createMonthlyPartition = async (date) => {
       return;
     }
 
-    await sql`
-      CREATE TABLE ${sql(partitionName)}
-      PARTITION OF ${sql(PARTITIONED_TABLE_NAME)}
-      FOR VALUES FROM (${startDate.toISOString()}) TO (${endDate.toISOString()})
-    `;
+    await sql.unsafe(`
+      CREATE TABLE ${partitionName}
+      PARTITION OF ${PARTITIONED_TABLE_NAME}
+      FOR VALUES FROM ('${startDate.toISOString()}') TO ('${endDate.toISOString()}')
+    `);
     
     console.log(`✅ 새 파티션 생성: ${partitionName} (${startDate.toISOString().split('T')[0]} ~ ${endDate.toISOString().split('T')[0]})`);
   } catch (error) {
@@ -217,10 +217,17 @@ export const batchInsert = async (logs) => {
       await ensureCurrentMonthPartition();
     }
     
-    const result = await sql`
-      INSERT INTO ${sql(currentTable)} ${sql(logs, 'level', 'type', 'message', 'metadata')}
-    `;
-    return result;
+    // 각 로그를 개별적으로 삽입
+    const results = [];
+    for (const log of logs) {
+      const result = await sql.unsafe(`
+        INSERT INTO ${currentTable} (level, type, message, metadata) 
+        VALUES ($1, $2, $3, $4)
+      `, [log.level, log.type, log.message, log.metadata]);
+      results.push(result);
+    }
+    
+    return results;
   } catch (error) {
     console.error('❌ 배치 삽입 실패:', error);
     throw error;
