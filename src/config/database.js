@@ -20,24 +20,51 @@ const sql = postgres(process.env.SHIBA_LOG_DATABASE_URL || '', {
 // 파티션 테이블 생성 및 초기 설정
 export const createPartitionTable = async () => {
   try {
-    // 기존 테이블이 파티션 테이블인지 확인
+    // 기존 테이블이 존재하는지 확인 (더 안전한 방법)
     const existingTable = await sql`
       SELECT 
-        schemaname, 
-        tablename, 
-        partitionname IS NOT NULL as is_partitioned
+        tablename,
+        CASE 
+          WHEN EXISTS (
+            SELECT 1 FROM pg_class c 
+            JOIN pg_namespace n ON n.oid = c.relnamespace 
+            WHERE c.relname = 'game_logs' 
+            AND c.relkind = 'p'
+            AND n.nspname = 'public'
+          ) THEN true
+          ELSE false
+        END as is_partitioned
       FROM pg_tables 
-      LEFT JOIN pg_partitions ON pg_tables.tablename = pg_partitions.tablename
-      WHERE pg_tables.tablename = 'game_logs'
+      WHERE tablename = 'game_logs' 
+      AND schemaname = 'public'
     `;
 
     if (existingTable.length > 0 && !existingTable[0].is_partitioned) {
       console.log('📋 기존 game_logs 테이블이 발견되었습니다 (파티션 테이블 아님)');
       console.log('✅ 기존 데이터는 그대로 유지됩니다');
-    } else {
-      // 메인 파티션 테이블 생성 (기존 테이블이 없거나 이미 파티션 테이블인 경우)
+      console.log('ℹ️  새 로그는 기존 테이블에 계속 저장됩니다');
+      
+      // 기존 테이블에 인덱스만 추가
       await sql`
-        CREATE TABLE IF NOT EXISTS game_logs (
+        CREATE INDEX IF NOT EXISTS idx_game_logs_timestamp ON game_logs(timestamp)
+      `;
+      await sql`
+        CREATE INDEX IF NOT EXISTS idx_game_logs_type ON game_logs(type)
+      `;
+      await sql`
+        CREATE INDEX IF NOT EXISTS idx_game_logs_level ON game_logs(level)
+      `;
+      
+      console.log('✅ 기존 테이블 인덱스 설정 완료');
+      return; // 파티션 생성 없이 종료
+      
+    } else if (existingTable.length > 0 && existingTable[0].is_partitioned) {
+      console.log('📋 기존 파티션 테이블이 발견되었습니다');
+    } else {
+      // 새로운 파티션 테이블 생성
+      console.log('🆕 새로운 파티션 테이블을 생성합니다');
+      await sql`
+        CREATE TABLE game_logs (
           id BIGSERIAL,
           timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
           level VARCHAR(10) NOT NULL,
@@ -47,6 +74,7 @@ export const createPartitionTable = async () => {
           PRIMARY KEY (timestamp, id)
         ) PARTITION BY RANGE (timestamp)
       `;
+      console.log('✅ 파티션 테이블 생성 완료');
     }
 
     // 인덱스 생성 (기존 테이블에도 적용)
@@ -62,8 +90,11 @@ export const createPartitionTable = async () => {
 
     console.log('✅ 파티션 테이블 및 인덱스 설정 완료');
 
-    // 2025년 6월부터 현재 월까지의 파티션 자동 생성
-    await createInitialPartitions();
+    // 파티션 테이블인 경우에만 월별 파티션 생성
+    if (existingTable.length === 0 || existingTable[0].is_partitioned) {
+      console.log('📅 월별 파티션 생성을 시작합니다...');
+      await createInitialPartitions();
+    }
 
   } catch (error) {
     console.error('❌ 파티션 테이블 생성 실패:', error);
@@ -171,8 +202,21 @@ export const getPartitionList = async () => {
 // 배치 삽입 함수
 export const batchInsert = async (logs) => {
   try {
-    // 현재 월 파티션이 존재하는지 확인하고 없으면 생성
-    await ensureCurrentMonthPartition();
+    // 테이블이 파티션 테이블인지 확인
+    const isPartitioned = await sql`
+      SELECT EXISTS (
+        SELECT 1 FROM pg_class c 
+        JOIN pg_namespace n ON n.oid = c.relnamespace 
+        WHERE c.relname = 'game_logs' 
+        AND c.relkind = 'p'
+        AND n.nspname = 'public'
+      ) as is_partitioned
+    `;
+    
+    // 파티션 테이블인 경우에만 파티션 확인/생성
+    if (isPartitioned[0].is_partitioned) {
+      await ensureCurrentMonthPartition();
+    }
     
     const result = await sql`
       INSERT INTO game_logs ${sql(logs, 'level', 'type', 'message', 'metadata')}
@@ -266,26 +310,46 @@ export const testConnection = async () => {
 };
 
 // 파티션 관리를 위한 스케줄러 (매일 자정에 실행)
-export const startPartitionScheduler = () => {
-  const now = new Date();
-  const tomorrow = new Date(now);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  tomorrow.setHours(0, 0, 0, 0);
-  
-  const timeUntilMidnight = tomorrow.getTime() - now.getTime();
-  
-  setTimeout(() => {
-    // 매일 자정에 파티션 확인
-    setInterval(async () => {
-      console.log('🕛 일일 파티션 확인 중...');
-      await ensureCurrentMonthPartition();
-    }, 24 * 60 * 60 * 1000); // 24시간마다
+export const startPartitionScheduler = async () => {
+  try {
+    // 테이블이 파티션 테이블인지 확인
+    const isPartitioned = await sql`
+      SELECT EXISTS (
+        SELECT 1 FROM pg_class c 
+        JOIN pg_namespace n ON n.oid = c.relnamespace 
+        WHERE c.relname = 'game_logs' 
+        AND c.relkind = 'p'
+        AND n.nspname = 'public'
+      ) as is_partitioned
+    `;
     
-    // 첫 실행
-    ensureCurrentMonthPartition();
-  }, timeUntilMidnight);
-  
-  console.log(`⏰ 파티션 스케줄러 시작됨 (다음 실행: ${tomorrow.toLocaleString('ko-KR')})`);
+    if (!isPartitioned[0].is_partitioned) {
+      console.log('ℹ️  일반 테이블이므로 파티션 스케줄러를 시작하지 않습니다');
+      return;
+    }
+    
+    const now = new Date();
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(0, 0, 0, 0);
+    
+    const timeUntilMidnight = tomorrow.getTime() - now.getTime();
+    
+    setTimeout(() => {
+      // 매일 자정에 파티션 확인
+      setInterval(async () => {
+        console.log('🕛 일일 파티션 확인 중...');
+        await ensureCurrentMonthPartition();
+      }, 24 * 60 * 60 * 1000); // 24시간마다
+      
+      // 첫 실행
+      ensureCurrentMonthPartition();
+    }, timeUntilMidnight);
+    
+    console.log(`⏰ 파티션 스케줄러 시작됨 (다음 실행: ${tomorrow.toLocaleString('ko-KR')})`);
+  } catch (error) {
+    console.error('❌ 파티션 스케줄러 시작 실패:', error);
+  }
 };
 
 export default sql; 
