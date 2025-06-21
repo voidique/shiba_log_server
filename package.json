@@ -8,7 +8,9 @@
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
     "build": "echo 'No build step required'",
-    "test": "echo 'No tests specified'"
+    "test": "echo 'No tests specified'",
+    "backup": "node scripts/backup-database.js",
+    "backup:help": "echo 'bun run backup - 데이터베이스 백업 생성'"
   },
   "dependencies": {
     "express": "^4.18.2",
