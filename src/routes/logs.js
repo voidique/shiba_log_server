@@ -1,6 +1,6 @@
 import express from 'express';
 import { logMemoryStore } from '../services/log-memory-store.js';
-import { queryLogs, cleanupOldData } from '../config/database.js';
+import { queryLogs, cleanupOldData, getPartitionList } from '../config/database.js';
 import { validateApiKey } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -565,6 +565,49 @@ router.get('/health', (req, res) => {
       isProcessing: stats.isProcessing
     }
   });
+});
+
+/**
+ * @swagger
+ * /api/logs/partitions:
+ *   get:
+ *     summary: 파티션 목록 조회
+ *     description: 로그 스토어의 파티션 목록을 조회합니다.
+ *     tags:
+ *       - Logs
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: 파티션 목록 조회 성공
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: string
+ *       401:
+ *         description: 인증 실패
+ *       500:
+ *         description: 서버 에러
+ */
+// GET /api/logs/partitions - 파티션 목록 조회
+router.get('/partitions', async (req, res) => {
+  try {
+    const partitionList = await getPartitionList();
+    
+    res.json({
+      success: true,
+      data: partitionList,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('파티션 목록 조회 실패:', error);
+    res.status(500).json({
+      error: '파티션 목록 조회에 실패했습니다',
+      message: error.message
+    });
+  }
 });
 
 export default router; 

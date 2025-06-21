@@ -5,7 +5,7 @@ import compression from 'compression';
 import dotenv from 'dotenv';
 import swaggerUi from 'swagger-ui-express';
 import { logRequest, errorHandler } from './middleware/auth.js';
-import { createPartitionTable, testConnection } from './config/database.js';
+import { createPartitionTable, testConnection, startPartitionScheduler } from './config/database.js';
 import { swaggerSpec } from './config/swagger.js';
 import logsRouter from './routes/logs.js';
 
@@ -75,6 +75,7 @@ app.use('*', (req, res) => {
       'GET /api-docs - API 문서',
       'POST /api/logs - 로그 저장',
       'GET /api/logs - 로그 조회',
+      'GET /api/logs/partitions - 파티션 목록',
       'POST /api/logs/batch - 배치 로그 저장',
       'POST /api/logs/flush - 강제 플러시',
       'GET /api/logs/stats - 서버 통계',
@@ -115,6 +116,10 @@ async function startServer() {
     console.log('📊 파티션 테이블 설정 중...');
     await createPartitionTable();
 
+    // 파티션 스케줄러 시작
+    console.log('📅 파티션 스케줄러 시작 중...');
+    await startPartitionScheduler();
+
     // 서버 시작
     const server = app.listen(PORT, () => {
       console.log('');
@@ -130,6 +135,7 @@ async function startServer() {
       console.log('   GET  /api-docs - API 문서');
       console.log('   POST /api/logs - 로그 저장');
       console.log('   GET  /api/logs - 로그 조회');
+      console.log('   GET  /api/logs/partitions - 파티션 목록');
       console.log('   POST /api/logs/batch - 배치 로그 저장');
       console.log('   POST /api/logs/flush - 강제 플러시');
       console.log('   GET  /api/logs/stats - 서버 통계');
