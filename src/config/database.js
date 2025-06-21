@@ -17,54 +17,57 @@ const sql = postgres(process.env.SHIBA_LOG_DATABASE_URL || '', {
   },
 });
 
+// 설정: 사용할 테이블 선택
+const USE_PARTITIONED_TABLE = true; // true: 파티션 테이블 사용, false: 기존 테이블 사용
+const PARTITIONED_TABLE_NAME = 'game_logs_partitioned'; // 새로운 파티션 테이블명
+const LEGACY_TABLE_NAME = 'game_logs'; // 기존 테이블명
+
+// 현재 사용 중인 테이블명 반환
+export const getCurrentTableName = () => {
+  return USE_PARTITIONED_TABLE ? PARTITIONED_TABLE_NAME : LEGACY_TABLE_NAME;
+};
+
 // 파티션 테이블 생성 및 초기 설정
 export const createPartitionTable = async () => {
   try {
-    // 기존 테이블이 존재하는지 확인 (더 안전한 방법)
-    const existingTable = await sql`
-      SELECT 
-        tablename,
-        CASE 
-          WHEN EXISTS (
-            SELECT 1 FROM pg_class c 
-            JOIN pg_namespace n ON n.oid = c.relnamespace 
-            WHERE c.relname = 'game_logs' 
-            AND c.relkind = 'p'
-            AND n.nspname = 'public'
-          ) THEN true
-          ELSE false
-        END as is_partitioned
-      FROM pg_tables 
-      WHERE tablename = 'game_logs' 
-      AND schemaname = 'public'
-    `;
-
-    if (existingTable.length > 0 && !existingTable[0].is_partitioned) {
-      console.log('📋 기존 game_logs 테이블이 발견되었습니다 (파티션 테이블 아님)');
-      console.log('✅ 기존 데이터는 그대로 유지됩니다');
-      console.log('ℹ️  새 로그는 기존 테이블에 계속 저장됩니다');
+    if (!USE_PARTITIONED_TABLE) {
+      console.log('ℹ️  파티션 테이블 사용 안함 - 기존 테이블 사용');
+      console.log(`📋 현재 사용 테이블: ${LEGACY_TABLE_NAME}`);
       
       // 기존 테이블에 인덱스만 추가
       await sql`
-        CREATE INDEX IF NOT EXISTS idx_game_logs_timestamp ON game_logs(timestamp)
+        CREATE INDEX IF NOT EXISTS idx_game_logs_timestamp ON ${sql(LEGACY_TABLE_NAME)}(timestamp)
       `;
       await sql`
-        CREATE INDEX IF NOT EXISTS idx_game_logs_type ON game_logs(type)
+        CREATE INDEX IF NOT EXISTS idx_game_logs_type ON ${sql(LEGACY_TABLE_NAME)}(type)
       `;
       await sql`
-        CREATE INDEX IF NOT EXISTS idx_game_logs_level ON game_logs(level)
+        CREATE INDEX IF NOT EXISTS idx_game_logs_level ON ${sql(LEGACY_TABLE_NAME)}(level)
       `;
       
       console.log('✅ 기존 테이블 인덱스 설정 완료');
-      return; // 파티션 생성 없이 종료
-      
-    } else if (existingTable.length > 0 && existingTable[0].is_partitioned) {
-      console.log('📋 기존 파티션 테이블이 발견되었습니다');
+      return;
+    }
+
+    console.log('🚀 새로운 파티션 테이블 시스템 구축 중...');
+    console.log(`📋 파티션 테이블명: ${PARTITIONED_TABLE_NAME}`);
+    console.log(`🔒 기존 테이블(${LEGACY_TABLE_NAME})은 건드리지 않습니다`);
+
+    // 파티션 테이블이 이미 존재하는지 확인
+    const existingPartitionTable = await sql`
+      SELECT tablename
+      FROM pg_tables 
+      WHERE tablename = ${PARTITIONED_TABLE_NAME}
+      AND schemaname = 'public'
+    `;
+
+    if (existingPartitionTable.length > 0) {
+      console.log('📋 파티션 테이블이 이미 존재합니다');
     } else {
       // 새로운 파티션 테이블 생성
       console.log('🆕 새로운 파티션 테이블을 생성합니다');
       await sql`
-        CREATE TABLE game_logs (
+        CREATE TABLE ${sql(PARTITIONED_TABLE_NAME)} (
           id BIGSERIAL,
           timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
           level VARCHAR(10) NOT NULL,
@@ -77,24 +80,20 @@ export const createPartitionTable = async () => {
       console.log('✅ 파티션 테이블 생성 완료');
     }
 
-    // 인덱스 생성 (기존 테이블에도 적용)
+    // 파티션 테이블 인덱스 생성
     await sql`
-      CREATE INDEX IF NOT EXISTS idx_game_logs_timestamp ON game_logs(timestamp)
+      CREATE INDEX IF NOT EXISTS ${sql(`idx_${PARTITIONED_TABLE_NAME}_timestamp`)} ON ${sql(PARTITIONED_TABLE_NAME)}(timestamp)
     `;
     await sql`
-      CREATE INDEX IF NOT EXISTS idx_game_logs_type ON game_logs(type)
+      CREATE INDEX IF NOT EXISTS ${sql(`idx_${PARTITIONED_TABLE_NAME}_type`)} ON ${sql(PARTITIONED_TABLE_NAME)}(type)
     `;
     await sql`
-      CREATE INDEX IF NOT EXISTS idx_game_logs_level ON game_logs(level)
+      CREATE INDEX IF NOT EXISTS ${sql(`idx_${PARTITIONED_TABLE_NAME}_level`)} ON ${sql(PARTITIONED_TABLE_NAME)}(level)
     `;
 
     console.log('✅ 파티션 테이블 및 인덱스 설정 완료');
-
-    // 파티션 테이블인 경우에만 월별 파티션 생성
-    if (existingTable.length === 0 || existingTable[0].is_partitioned) {
-      console.log('📅 월별 파티션 생성을 시작합니다...');
-      await createInitialPartitions();
-    }
+    console.log('📅 월별 파티션 생성을 시작합니다...');
+    await createInitialPartitions();
 
   } catch (error) {
     console.error('❌ 파티션 테이블 생성 실패:', error);
@@ -104,6 +103,8 @@ export const createPartitionTable = async () => {
 
 // 초기 파티션들을 생성 (2025년 6월부터)
 const createInitialPartitions = async () => {
+  if (!USE_PARTITIONED_TABLE) return;
+
   const now = new Date();
   const startYear = 2025;
   const startMonth = 6; // 6월
@@ -129,9 +130,11 @@ const createInitialPartitions = async () => {
 
 // 월별 파티션 생성
 export const createMonthlyPartition = async (date) => {
+  if (!USE_PARTITIONED_TABLE) return;
+
   const year = date.getFullYear();
   const month = date.getMonth() + 1;
-  const partitionName = `game_logs_${year}_${month
+  const partitionName = `${PARTITIONED_TABLE_NAME}_${year}_${month
     .toString()
     .padStart(2, '0')}`;
   const startDate = new Date(year, month - 1, 1);
@@ -152,7 +155,7 @@ export const createMonthlyPartition = async (date) => {
 
     await sql`
       CREATE TABLE ${sql(partitionName)}
-      PARTITION OF game_logs
+      PARTITION OF ${sql(PARTITIONED_TABLE_NAME)}
       FOR VALUES FROM (${startDate.toISOString()}) TO (${endDate.toISOString()})
     `;
     
@@ -164,6 +167,8 @@ export const createMonthlyPartition = async (date) => {
 
 // 매월 자동으로 새 파티션 생성 (서버 실행 중)
 export const ensureCurrentMonthPartition = async () => {
+  if (!USE_PARTITIONED_TABLE) return;
+
   const now = new Date();
   await createMonthlyPartition(now);
   
@@ -175,21 +180,24 @@ export const ensureCurrentMonthPartition = async () => {
 // 파티션 목록 조회
 export const getPartitionList = async () => {
   try {
+    const currentTable = getCurrentTableName();
     const partitions = await sql`
       SELECT 
         schemaname,
         tablename,
         CASE 
-          WHEN tablename ~ '^game_logs_[0-9]{4}_[0-9]{2}$' THEN
+          WHEN tablename = ${currentTable} THEN '메인 테이블'
+          WHEN tablename ~ ${`^${currentTable.replace('_', '\\_')}_[0-9]{4}_[0-9]{2}$`} THEN
             CONCAT(
-              SUBSTRING(tablename FROM 11 FOR 4), '년 ',
-              LPAD(SUBSTRING(tablename FROM 16 FOR 2), 2, '0'), '월'
+              SUBSTRING(tablename FROM ${currentTable.length + 2} FOR 4), '년 ',
+              LPAD(SUBSTRING(tablename FROM ${currentTable.length + 7} FOR 2), 2, '0'), '월'
             )
-          ELSE '기본 테이블'
-        END as period
+          ELSE '기타'
+        END as period,
+        CASE WHEN tablename = ${currentTable} THEN 1 ELSE 2 END as sort_order
       FROM pg_tables 
-      WHERE tablename LIKE 'game_logs%'
-      ORDER BY tablename
+      WHERE tablename LIKE ${currentTable + '%'}
+      ORDER BY sort_order, tablename
     `;
     
     return partitions;
@@ -202,24 +210,15 @@ export const getPartitionList = async () => {
 // 배치 삽입 함수
 export const batchInsert = async (logs) => {
   try {
-    // 테이블이 파티션 테이블인지 확인
-    const isPartitioned = await sql`
-      SELECT EXISTS (
-        SELECT 1 FROM pg_class c 
-        JOIN pg_namespace n ON n.oid = c.relnamespace 
-        WHERE c.relname = 'game_logs' 
-        AND c.relkind = 'p'
-        AND n.nspname = 'public'
-      ) as is_partitioned
-    `;
+    const currentTable = getCurrentTableName();
     
-    // 파티션 테이블인 경우에만 파티션 확인/생성
-    if (isPartitioned[0].is_partitioned) {
+    // 파티션 테이블 사용 시에만 파티션 확인/생성
+    if (USE_PARTITIONED_TABLE) {
       await ensureCurrentMonthPartition();
     }
     
     const result = await sql`
-      INSERT INTO game_logs ${sql(logs, 'level', 'type', 'message', 'metadata')}
+      INSERT INTO ${sql(currentTable)} ${sql(logs, 'level', 'type', 'message', 'metadata')}
     `;
     return result;
   } catch (error) {
@@ -241,6 +240,7 @@ export const queryLogs = async (filters = {}) => {
   } = filters;
 
   try {
+    const currentTable = getCurrentTableName();
     let conditions = [];
     let params = [];
 
@@ -269,7 +269,7 @@ export const queryLogs = async (filters = {}) => {
     
     const query = `
       WITH filtered_logs AS (
-        SELECT * FROM game_logs ${whereClause}
+        SELECT * FROM ${currentTable} ${whereClause}
       )
       SELECT 
         (SELECT COUNT(*) FROM filtered_logs) as total_count,
@@ -312,19 +312,8 @@ export const testConnection = async () => {
 // 파티션 관리를 위한 스케줄러 (매일 자정에 실행)
 export const startPartitionScheduler = async () => {
   try {
-    // 테이블이 파티션 테이블인지 확인
-    const isPartitioned = await sql`
-      SELECT EXISTS (
-        SELECT 1 FROM pg_class c 
-        JOIN pg_namespace n ON n.oid = c.relnamespace 
-        WHERE c.relname = 'game_logs' 
-        AND c.relkind = 'p'
-        AND n.nspname = 'public'
-      ) as is_partitioned
-    `;
-    
-    if (!isPartitioned[0].is_partitioned) {
-      console.log('ℹ️  일반 테이블이므로 파티션 스케줄러를 시작하지 않습니다');
+    if (!USE_PARTITIONED_TABLE) {
+      console.log('ℹ️  파티션 테이블을 사용하지 않으므로 스케줄러를 시작하지 않습니다');
       return;
     }
     
@@ -350,6 +339,19 @@ export const startPartitionScheduler = async () => {
   } catch (error) {
     console.error('❌ 파티션 스케줄러 시작 실패:', error);
   }
+};
+
+// 테이블 전환 함수 (운영 중 전환 가능)
+export const switchToPartitionedTable = async () => {
+  console.log('🔄 파티션 테이블로 전환 중...');
+  console.log('ℹ️  이 작업은 서버 재시작 후 적용됩니다');
+  console.log('📝 database.js 파일에서 USE_PARTITIONED_TABLE = true로 설정하세요');
+};
+
+export const switchToLegacyTable = async () => {
+  console.log('🔄 기존 테이블로 전환 중...');
+  console.log('ℹ️  이 작업은 서버 재시작 후 적용됩니다');
+  console.log('📝 database.js 파일에서 USE_PARTITIONED_TABLE = false로 설정하세요');
 };
 
 export default sql; 

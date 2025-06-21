@@ -5,7 +5,7 @@ import compression from 'compression';
 import dotenv from 'dotenv';
 import swaggerUi from 'swagger-ui-express';
 import { logRequest, errorHandler } from './middleware/auth.js';
-import { createPartitionTable, testConnection, startPartitionScheduler } from './config/database.js';
+import { createPartitionTable, testConnection, startPartitionScheduler, getCurrentTableName } from './config/database.js';
 import { swaggerSpec } from './config/swagger.js';
 import logsRouter from './routes/logs.js';
 
@@ -76,11 +76,14 @@ app.use('*', (req, res) => {
       'POST /api/logs - 로그 저장',
       'GET /api/logs - 로그 조회',
       'GET /api/logs/partitions - 파티션 목록',
+      'GET /api/logs/current-table - 현재 테이블 정보',
       'POST /api/logs/batch - 배치 로그 저장',
       'POST /api/logs/flush - 강제 플러시',
       'GET /api/logs/stats - 서버 통계',
       'GET /api/logs/health - 헬스체크',
-      'POST /api/logs/cleanup - 데이터 정리'
+      'POST /api/logs/cleanup - 데이터 정리',
+      'POST /api/logs/switch-to-partitioned - 파티션 테이블 전환',
+      'POST /api/logs/switch-to-legacy - 레거시 테이블 전환'
     ]
   });
 });
@@ -122,6 +125,7 @@ async function startServer() {
 
     // 서버 시작
     const server = app.listen(PORT, () => {
+      const currentTable = getCurrentTableName();
       console.log('');
       console.log('🎉 =================================');
       console.log('✅ Shiba Log Server 시작 완료!');
@@ -129,6 +133,7 @@ async function startServer() {
       console.log(`🔧 환경: ${process.env.NODE_ENV || 'development'}`);
       console.log(`📦 Node.js 버전: ${process.version}`);
       console.log(`⏰ 시작 시간: ${serverStartTime.toISOString()}`);
+      console.log(`🗄️  사용 테이블: ${currentTable}`);
       console.log('🎉 =================================');
       console.log('');
       console.log('📋 사용 가능한 엔드포인트:');
@@ -136,11 +141,14 @@ async function startServer() {
       console.log('   POST /api/logs - 로그 저장');
       console.log('   GET  /api/logs - 로그 조회');
       console.log('   GET  /api/logs/partitions - 파티션 목록');
+      console.log('   GET  /api/logs/current-table - 현재 테이블 정보');
       console.log('   POST /api/logs/batch - 배치 로그 저장');
       console.log('   POST /api/logs/flush - 강제 플러시');
       console.log('   GET  /api/logs/stats - 서버 통계');
       console.log('   GET  /api/logs/health - 헬스체크');
       console.log('   POST /api/logs/cleanup - 데이터 정리');
+      console.log('   POST /api/logs/switch-to-partitioned - 파티션 테이블 전환');
+      console.log('   POST /api/logs/switch-to-legacy - 레거시 테이블 전환');
       console.log('');
       console.log('🔑 모든 /api/logs 엔드포인트는 x-api-key 헤더가 필요합니다.');
       console.log('');

@@ -1,6 +1,6 @@
 import express from 'express';
 import { logMemoryStore } from '../services/log-memory-store.js';
-import { queryLogs, cleanupOldData, getPartitionList } from '../config/database.js';
+import { queryLogs, cleanupOldData, getPartitionList, getCurrentTableName, switchToPartitionedTable, switchToLegacyTable } from '../config/database.js';
 import { validateApiKey } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -605,6 +605,135 @@ router.get('/partitions', async (req, res) => {
     console.error('파티션 목록 조회 실패:', error);
     res.status(500).json({
       error: '파티션 목록 조회에 실패했습니다',
+      message: error.message
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/logs/current-table:
+ *   get:
+ *     summary: 현재 사용 중인 테이블 정보 조회
+ *     description: 로그 스토어의 현재 사용 중인 테이블 정보를 조회합니다.
+ *     tags:
+ *       - Logs
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: 테이블 정보 조회 성공
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 tableName:
+ *                   type: string
+ *                   description: 현재 사용 중인 테이블 이름
+ *       401:
+ *         description: 인증 실패
+ *       500:
+ *         description: 서버 에러
+ */
+// GET /api/logs/current-table - 현재 사용 중인 테이블 정보 조회
+router.get('/current-table', async (req, res) => {
+  try {
+    const tableName = await getCurrentTableName();
+    
+    res.json({
+      success: true,
+      data: {
+        tableName: tableName
+      },
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('테이블 정보 조회 실패:', error);
+    res.status(500).json({
+      error: '테이블 정보 조회에 실패했습니다',
+      message: error.message
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/logs/switch-to-partitioned:
+ *   post:
+ *     summary: 파티션 테이블로 전환
+ *     description: 로그 스토어를 파티션 테이블로 전환합니다.
+ *     tags:
+ *       - Logs
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: 전환 성공
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/SuccessResponse'
+ *       401:
+ *         description: 인증 실패
+ *       500:
+ *         description: 서버 에러
+ */
+// POST /api/logs/switch-to-partitioned - 파티션 테이블로 전환
+router.post('/switch-to-partitioned', async (req, res) => {
+  try {
+    await switchToPartitionedTable();
+    
+    res.json({
+      success: true,
+      message: '로그 스토어가 파티션 테이블로 전환되었습니다',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('파티션 테이블로 전환 실패:', error);
+    res.status(500).json({
+      error: '로그 스토어를 파티션 테이블로 전환에 실패했습니다',
+      message: error.message
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/logs/switch-to-legacy:
+ *   post:
+ *     summary: 레그시 테이블로 전환
+ *     description: 로그 스토어를 레그시 테이블로 전환합니다.
+ *     tags:
+ *       - Logs
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: 전환 성공
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/SuccessResponse'
+ *       401:
+ *         description: 인증 실패
+ *       500:
+ *         description: 서버 에러
+ */
+// POST /api/logs/switch-to-legacy - 레그시 테이블로 전환
+router.post('/switch-to-legacy', async (req, res) => {
+  try {
+    await switchToLegacyTable();
+    
+    res.json({
+      success: true,
+      message: '로그 스토어가 레그시 테이블로 전환되었습니다',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('레그시 테이블로 전환 실패:', error);
+    res.status(500).json({
+      error: '로그 스토어를 레그시 테이블로 전환에 실패했습니다',
       message: error.message
     });
   }
