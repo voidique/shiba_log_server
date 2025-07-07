@@ -385,48 +385,32 @@ export const getPartitionList = async () => {
   }
 };
 
-// 배치 삽입 함수 (트랜잭션 기반으로 완전 개선)
+// 로그 삽입 함수 (트랜잭션 비활성화: 즉시 커밋)
 export const batchInsert = async (logs) => {
-  if (!logs || logs.length === 0) {
-    return [];
-  }
+  if (!logs || logs.length === 0) return []
 
-  let transaction = null;
   try {
-    const currentTable = getCurrentTableName();
-    
-    // 파티션 테이블 사용 시에만 파티션 확인/생성
+    const currentTable = getCurrentTableName()
+
+    // 파티션 테이블 사용 시 월별 파티션을 먼저 보장
     if (USE_PARTITIONED_TABLE) {
-      await ensureCurrentMonthPartition();
+      await ensureCurrentMonthPartition()
     }
-    
-    // 트랜잭션 시작
-    transaction = await sql.begin();
-    console.log(`🔄 트랜잭션 시작 - ${logs.length}개 로그 일괄 처리`);
-    
-    // -------------------------------------------------------
-    //  📦 1) 입력값 안전 정규화
-    // -------------------------------------------------------
+
+    // 1) 입력값 정규화
     const safeRows = logs.map(raw => {
-      const level = typeof raw.level === 'string' && raw.level.trim() !== ''
-        ? raw.level.trim() : 'info'
-
-      const type    = String(raw.type    || '').trim()
+      const level = typeof raw.level === 'string' && raw.level.trim() !== '' ? raw.level.trim() : 'info'
+      const type = String(raw.type || '').trim()
       const message = String(raw.message || '').trim()
-
-      // metadata → JSON 호환값 (null 또는 객체) 로 유지
       const metadata = raw.metadata === undefined ? null : raw.metadata
 
       const createdAt = raw.createdAt ? new Date(raw.createdAt) : new Date()
-      const loggedAt  = new Date()
+      const loggedAt = new Date()
 
       return { level, type, message, metadata, createdAt, loggedAt }
     })
 
-    // -------------------------------------------------------
-    //  📦 2) VALUES 리스트 빌드 (드라이버에 개별 파라미터 전달)
-    //       → 배열 UNNEST 를 사용하지 않아 타입 캐스팅 문제 원천 차단
-    // -------------------------------------------------------
+    // 2) 멀티-row VALUES 구문으로 한 번에 삽입 (암묵적 오토커밋)
     const rowsSqlFragments = safeRows.map(r => sql`(
       ${r.level},
       ${r.type},
@@ -436,39 +420,17 @@ export const batchInsert = async (logs) => {
       ${r.loggedAt}
     )`)
 
-    const result = await transaction`
+    const result = await sql`
       INSERT INTO ${sql(currentTable)}
         (level, type, message, metadata, created_at, logged_at)
       VALUES ${sql.join(rowsSqlFragments, sql`, `)}
     `
-    
-    // 트랜잭션 커밋
-    await transaction.commit();
-    console.log(`✅ 트랜잭션 커밋 완료 - ${logs.length}개 로그 저장 성공`);
-    
-    return result;
-    
+
+    console.log(`✅ 로그 ${logs.length}개 저장 완료 (즉시 커밋)`)    
+    return result
   } catch (error) {
-    // 트랜잭션 롤백
-    if (transaction) {
-      try {
-        await transaction.rollback();
-        console.log(`🔄 트랜잭션 롤백 완료 - ${logs.length}개 로그 저장 실패`);
-      } catch (rollbackError) {
-        console.error('❌ 트랜잭션 롤백 실패:', rollbackError);
-      }
-    }
-    
-    // 에러 세부 정보 로깅
-    console.error('❌ 배치 삽입 실패 상세:', {
-      errorMessage: error.message,
-      errorCode: error.code,
-      logsCount: logs.length,
-      tableName: getCurrentTableName(),
-      timestamp: new Date().toISOString()
-    });
-    
-    throw error;
+    console.error('❌ 로그 저장 실패:', error)
+    throw error
   }
 };
 
@@ -711,86 +673,85 @@ export const verifySystemHealth = async () => {
         checks.partitionedTable = true;
         console.log('✅ 파티션 테이블 구조 정상');
       }
-      
-      // 4. 파티션들 확인
-      console.log('📌 개별 파티션 테이블 확인...');
-      const partitions = await sql`
-        SELECT tablename 
-        FROM pg_tables 
-        WHERE tablename ~ ${`^${PARTITIONED_TABLE_NAME}_[0-9]{4}_[0-9]{2}$`}
-        AND schemaname = 'public'
-      `;
-      
-      let partitionIssues = 0;
-      for (const partition of partitions) {
-        const partitionColumns = await sql`
-          SELECT column_name
-          FROM information_schema.columns
-          WHERE table_name = ${partition.tablename}
-          AND table_schema = 'public'
-          AND column_name IN ('created_at', 'logged_at')
-        `;
-        
-        if (partitionColumns.length < 2) {
-          partitionIssues++;
-          issues.push(`❌ ${partition.tablename} 파티션에 시간 필드 누락`);
-        }
-      }
-      
-      if (partitionIssues === 0) {
-        checks.partitions = true;
-        console.log(`✅ 모든 파티션 (${partitions.length}개) 구조 정상`);
-      }
     }
     
-    // 5. 인덱스 확인
-    console.log('📌 인덱스 확인...');
-    const indexes = await sql`
-      SELECT indexname 
-      FROM pg_indexes 
-      WHERE tablename IN (${LEGACY_TABLE_NAME}, ${PARTITIONED_TABLE_NAME})
+    // 4. 파티션들 확인
+    console.log('📌 개별 파티션 테이블 확인...');
+    const partitions = await sql`
+      SELECT tablename 
+      FROM pg_tables 
+      WHERE tablename ~ ${`^${PARTITIONED_TABLE_NAME}_[0-9]{4}_[0-9]{2}$`}
       AND schemaname = 'public'
     `;
     
-    const requiredIndexes = ['created_at', 'logged_at', 'timestamp', 'type', 'level'];
-    const missingIndexes = [];
-    
-    requiredIndexes.forEach(field => {
-      const hasIndex = indexes.some(idx => 
-        idx.indexname.includes(field)
-      );
-      if (!hasIndex) {
-        missingIndexes.push(field);
+    let partitionIssues = 0;
+    for (const partition of partitions) {
+      const partitionColumns = await sql`
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_name = ${partition.tablename}
+        AND table_schema = 'public'
+        AND column_name IN ('created_at', 'logged_at')
+      `;
+      
+      if (partitionColumns.length < 2) {
+        partitionIssues++;
+        issues.push(`❌ ${partition.tablename} 파티션에 시간 필드 누락`);
       }
-    });
-    
-    if (missingIndexes.length > 0) {
-      issues.push(`❌ 누락된 인덱스: ${missingIndexes.join(', ')}`);
-    } else {
-      checks.indexes = true;
-      console.log('✅ 모든 필수 인덱스 존재');
     }
     
-    // 6. 최종 결과
-    console.log('\n📊 시스템 검증 결과:');
-    console.log('========================');
-    Object.entries(checks).forEach(([key, value]) => {
-      console.log(`${value ? '✅' : '❌'} ${key}: ${value ? '정상' : '문제 발견'}`);
-    });
-    
-    if (issues.length > 0) {
-      console.log('\n⚠️  발견된 문제들:');
-      issues.forEach(issue => console.log(issue));
-      return false;
+    if (partitionIssues === 0) {
+      checks.partitions = true;
+      console.log(`✅ 모든 파티션 (${partitions.length}개) 구조 정상`);
     }
-    
-    console.log('\n🎉 모든 시스템 구성 요소가 정상입니다!');
-    return true;
-    
   } catch (error) {
     console.error('❌ 시스템 검증 중 에러:', error);
     return false;
   }
+  
+  // 5. 인덱스 확인
+  console.log('📌 인덱스 확인...');
+  const indexes = await sql`
+    SELECT indexname 
+    FROM pg_indexes 
+    WHERE tablename IN (${LEGACY_TABLE_NAME}, ${PARTITIONED_TABLE_NAME})
+    AND schemaname = 'public'
+  `;
+  
+  const requiredIndexes = ['created_at', 'logged_at', 'timestamp', 'type', 'level'];
+  const missingIndexes = [];
+  
+  requiredIndexes.forEach(field => {
+    const hasIndex = indexes.some(idx => 
+      idx.indexname.includes(field)
+    );
+    if (!hasIndex) {
+      missingIndexes.push(field);
+    }
+  });
+  
+  if (missingIndexes.length > 0) {
+    issues.push(`❌ 누락된 인덱스: ${missingIndexes.join(', ')}`);
+  } else {
+    checks.indexes = true;
+    console.log('✅ 모든 필수 인덱스 존재');
+  }
+  
+  // 6. 최종 결과
+  console.log('\n📊 시스템 검증 결과:');
+  console.log('========================');
+  Object.entries(checks).forEach(([key, value]) => {
+    console.log(`${value ? '✅' : '❌'} ${key}: ${value ? '정상' : '문제 발견'}`);
+  });
+  
+  if (issues.length > 0) {
+    console.log('\n⚠️  발견된 문제들:');
+    issues.forEach(issue => console.log(issue));
+    return false;
+  }
+  
+  console.log('\n🎉 모든 시스템 구성 요소가 정상입니다!');
+  return true;
 };
 
 // 자동 복구 함수
@@ -823,4 +784,4 @@ export const autoRepairSystem = async () => {
   }
 };
 
-export default sql; 
+export default sql;
