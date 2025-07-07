@@ -404,34 +404,43 @@ export const batchInsert = async (logs) => {
     transaction = await sql.begin();
     console.log(`🔄 트랜잭션 시작 - ${logs.length}개 로그 일괄 처리`);
     
-    // 벌크 삽입을 위한 데이터 준비
-    const values = logs.map(raw => {
-      const level = typeof raw.level === 'string' && raw.level.trim() !== '' ? raw.level.trim() : 'info'
-      const type = String(raw.type || '').trim()
-      const message = String(raw.message || '').trim()
-      // NOTE: metadata 가 undefined 이면 null, 객체면 그대로, 문자열이면 JSON.parse 시도 후 실패 시 그대로 문자열
-      let metadata = null
-      if (raw.metadata !== undefined && raw.metadata !== null) {
-        if (typeof raw.metadata === 'object') metadata = raw.metadata
-        else {
-          try { metadata = JSON.parse(raw.metadata) } catch { metadata = String(raw.metadata) }
-        }
-      }
-      const createdAt = raw.createdAt ? new Date(raw.createdAt) : new Date()
-      const loggedAt = new Date()
+    // -------------------------------------------------------
+    //  📦 1) 입력값 안전 정규화
+    // -------------------------------------------------------
+    const safeRows = logs.map(raw => {
+      const level = typeof raw.level === 'string' && raw.level.trim() !== ''
+        ? raw.level.trim() : 'info'
 
-      return [level, type, message, metadata, createdAt, loggedAt]
+      const type    = String(raw.type    || '').trim()
+      const message = String(raw.message || '').trim()
+
+      // metadata → JSON 호환값 (null 또는 객체) 로 유지
+      const metadata = raw.metadata === undefined ? null : raw.metadata
+
+      const createdAt = raw.createdAt ? new Date(raw.createdAt) : new Date()
+      const loggedAt  = new Date()
+
+      return { level, type, message, metadata, createdAt, loggedAt }
     })
-    
-    // 벌크 삽입 실행 (트랜잭션 내에서)
-    const unnestTypes = ['varchar', 'varchar', 'text', 'jsonb', 'timestamptz', 'timestamptz']
-    const unnest = sql.unnest(values, unnestTypes)
+
+    // -------------------------------------------------------
+    //  📦 2) VALUES 리스트 빌드 (드라이버에 개별 파라미터 전달)
+    //       → 배열 UNNEST 를 사용하지 않아 타입 캐스팅 문제 원천 차단
+    // -------------------------------------------------------
+    const rowsSqlFragments = safeRows.map(r => sql`(
+      ${r.level},
+      ${r.type},
+      ${r.message},
+      ${r.metadata === null ? null : sql.json(r.metadata)},
+      ${r.createdAt},
+      ${r.loggedAt}
+    )`)
 
     const result = await transaction`
-      INSERT INTO ${sql(currentTable)} 
+      INSERT INTO ${sql(currentTable)}
         (level, type, message, metadata, created_at, logged_at)
-      SELECT * FROM ${unnest}
-    `;
+      VALUES ${sql.join(rowsSqlFragments, sql`, `)}
+    `
     
     // 트랜잭션 커밋
     await transaction.commit();
