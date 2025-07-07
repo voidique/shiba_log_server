@@ -397,8 +397,9 @@ export const batchInsert = async (logs) => {
       await ensureCurrentMonthPartition()
     }
 
-    // 1) 입력값 정규화
-    const safeRows = logs.map(raw => {
+    // 1) 입력값 정규화 & 개별 INSERT (즉시 커밋)
+    const results = []
+    for (const raw of logs) {
       const level = typeof raw.level === 'string' && raw.level.trim() !== '' ? raw.level.trim() : 'info'
       const type = String(raw.type || '').trim()
       const message = String(raw.message || '').trim()
@@ -407,27 +408,23 @@ export const batchInsert = async (logs) => {
       const createdAt = raw.createdAt ? new Date(raw.createdAt) : new Date()
       const loggedAt = new Date()
 
-      return { level, type, message, metadata, createdAt, loggedAt }
-    })
+      const res = await sql`
+        INSERT INTO ${sql(currentTable)}
+          (level, type, message, metadata, created_at, logged_at)
+        VALUES (
+          ${level},
+          ${type},
+          ${message},
+          ${metadata},
+          ${createdAt},
+          ${loggedAt}
+        )
+      `
+      results.push(res)
+    }
 
-    // 2) 멀티-row VALUES 구문으로 한 번에 삽입 (암묵적 오토커밋)
-    const rowsSqlFragments = safeRows.map(r => sql`(
-      ${r.level},
-      ${r.type},
-      ${r.message},
-      ${r.metadata === null ? null : sql.json(r.metadata)},
-      ${r.createdAt},
-      ${r.loggedAt}
-    )`)
-
-    const result = await sql`
-      INSERT INTO ${sql(currentTable)}
-        (level, type, message, metadata, created_at, logged_at)
-      VALUES ${sql.join(rowsSqlFragments, sql`, `)}
-    `
-
-    console.log(`✅ 로그 ${logs.length}개 저장 완료 (즉시 커밋)`)    
-    return result
+    console.log(`✅ 로그 ${logs.length}개 저장 완료 (개별 INSERT)`)
+    return results
   } catch (error) {
     console.error('❌ 로그 저장 실패:', error)
     throw error
