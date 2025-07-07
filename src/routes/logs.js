@@ -448,11 +448,27 @@ router.get('/stats', async (req, res) => {
           uptime: process.uptime(),
           memoryUsage: process.memoryUsage(),
           nodeVersion: process.version,
-          environment: process.env.NODE_ENV || 'development'
+          environment: process.env.NODE_ENV || 'development',
+          currentTable: getCurrentTableName()
         },
-        logStore: stats,
+        logStore: {
+          ...stats,
+          // 추가 정보
+          pendingLogs: logMemoryStore.getPendingLogs().length,
+          failedLogs: logMemoryStore.getFailedLogs().length,
+          healthStatus: stats.successRate === '100%' ? 'healthy' : 
+                       parseFloat(stats.successRate) > 95 ? 'warning' : 'critical'
+        },
         database: {
           connectionString: process.env.SHIBA_LOG_DATABASE_URL ? 'Connected' : 'Not configured'
+        },
+        // 새로운 상세 통계
+        performance: {
+          averageBufferSize: stats.bufferSize,
+          processingEfficiency: stats.isProcessing ? 'busy' : 'idle',
+          lastProcessedAt: stats.lastProcessedAt,
+          retryRate: stats.totalFailed > 0 ? 
+            ((stats.totalFailed / (stats.totalProcessed + stats.totalFailed)) * 100).toFixed(2) + '%' : '0%'
         }
       },
       timestamp: new Date().toISOString()
@@ -554,16 +570,69 @@ router.post('/cleanup', async (req, res) => {
 // GET /api/logs/health - 헬스체크
 router.get('/health', (req, res) => {
   const stats = logMemoryStore.getStats();
+  const failedLogs = logMemoryStore.getFailedLogs();
+  const pendingLogs = logMemoryStore.getPendingLogs();
+  
+  // 헬스 상태 결정
+  let healthStatus = 'healthy';
+  let issues = [];
+  
+  // 버퍼 크기가 너무 크면 경고
+  if (stats.bufferSize > stats.batchSize * 2) {
+    healthStatus = 'warning';
+    issues.push('버퍼 크기가 큽니다');
+  }
+  
+  // 실패율이 높으면 경고/위험
+  const successRate = parseFloat(stats.successRate);
+  if (successRate < 95 && successRate > 90) {
+    healthStatus = 'warning';
+    issues.push('로그 실패율이 높습니다');
+  } else if (successRate <= 90) {
+    healthStatus = 'critical';
+    issues.push('로그 실패율이 매우 높습니다');
+  }
+  
+  // 영구 실패한 로그가 있으면 경고
+  if (failedLogs.length > 0) {
+    healthStatus = healthStatus === 'healthy' ? 'warning' : healthStatus;
+    issues.push(`${failedLogs.length}개 로그가 영구 실패했습니다`);
+  }
+  
+  // 처리가 너무 오래 걸리면 경고
+  const now = Date.now();
+  const oldestPendingLog = pendingLogs.reduce((oldest, log) => {
+    return log.processingStartedAt < oldest ? log.processingStartedAt : oldest;
+  }, now);
+  
+  if (pendingLogs.length > 0 && (now - oldestPendingLog) > 30000) { // 30초 이상
+    healthStatus = 'warning';
+    issues.push('로그 처리가 지연되고 있습니다');
+  }
   
   res.json({
-    status: 'healthy',
+    status: healthStatus,
     timestamp: new Date().toISOString(),
     server: {
       uptime: process.uptime(),
       memory: process.memoryUsage(),
       bufferSize: stats.bufferSize,
       isProcessing: stats.isProcessing
-    }
+    },
+    logStore: {
+      totalProcessed: stats.totalProcessed,
+      totalFailed: stats.totalFailed,
+      successRate: stats.successRate,
+      pendingLogsCount: pendingLogs.length,
+      permanentlyFailedLogsCount: failedLogs.length,
+      lastProcessedAt: stats.lastProcessedAt
+    },
+    issues: issues.length > 0 ? issues : null,
+    recommendations: healthStatus !== 'healthy' ? [
+      healthStatus === 'critical' ? '데이터베이스 연결 상태를 확인하세요' : null,
+      stats.bufferSize > stats.batchSize * 2 ? '수동 플러시를 실행하세요' : null,
+      failedLogs.length > 0 ? '실패한 로그들을 재시도하세요' : null
+    ].filter(Boolean) : null
   });
 });
 
@@ -734,6 +803,197 @@ router.post('/switch-to-legacy', async (req, res) => {
     console.error('레그시 테이블로 전환 실패:', error);
     res.status(500).json({
       error: '로그 스토어를 레그시 테이블로 전환에 실패했습니다',
+      message: error.message
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/logs/retry-failed:
+ *   post:
+ *     summary: 실패한 로그 재시도
+ *     description: 영구 실패한 로그들을 다시 처리 대기열에 추가합니다.
+ *     tags:
+ *       - Management
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: 재시도 성공
+ *         content:
+ *           application/json:
+ *             schema:
+ *               allOf:
+ *                 - $ref: '#/components/schemas/SuccessResponse'
+ *                 - type: object
+ *                   properties:
+ *                     retriedCount:
+ *                       type: integer
+ *                       description: 재시도한 로그 개수
+ *       401:
+ *         description: 인증 실패
+ *       500:
+ *         description: 서버 에러
+ */
+// POST /api/logs/retry-failed - 실패한 로그 재시도
+router.post('/retry-failed', async (req, res) => {
+  try {
+    const failedLogs = logMemoryStore.getFailedLogs();
+    const failedCount = failedLogs.length;
+    
+    if (failedCount === 0) {
+      return res.json({
+        success: true,
+        message: '재시도할 실패한 로그가 없습니다',
+        retriedCount: 0,
+        timestamp: new Date().toISOString()
+      });
+    }
+    
+    await logMemoryStore.retryFailedLogs();
+    
+    res.json({
+      success: true,
+      message: `${failedCount}개 실패한 로그 재시도를 시작했습니다`,
+      retriedCount: failedCount,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('실패한 로그 재시도 중 에러:', error);
+    res.status(500).json({
+      error: '실패한 로그 재시도에 실패했습니다',
+      message: error.message
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/logs/failed:
+ *   get:
+ *     summary: 실패한 로그 목록 조회
+ *     description: 영구 실패한 로그들의 상세 정보를 조회합니다.
+ *     tags:
+ *       - Monitoring
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: 실패한 로그 목록 조회 성공
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       logId:
+ *                         type: string
+ *                       type:
+ *                         type: string
+ *                       message:
+ *                         type: string
+ *                       retryCount:
+ *                         type: integer
+ *                       finalFailureReason:
+ *                         type: string
+ *                       finalFailureAt:
+ *                         type: number
+ *       401:
+ *         description: 인증 실패
+ *       500:
+ *         description: 서버 에러
+ */
+// GET /api/logs/failed - 실패한 로그 목록 조회
+router.get('/failed', async (req, res) => {
+  try {
+    const failedLogs = logMemoryStore.getFailedLogs();
+    
+    res.json({
+      success: true,
+      data: failedLogs.map(log => ({
+        logId: log.logId,
+        type: log.type,
+        message: log.message?.slice(0, 100) + (log.message?.length > 100 ? '...' : ''),
+        level: log.level,
+        retryCount: log.retryCount,
+        finalFailureReason: log.finalFailureReason,
+        finalFailureAt: log.finalFailureAt,
+        createdAt: log.createdAt,
+        batchId: log.batchId
+      })),
+      count: failedLogs.length,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('실패한 로그 목록 조회 실패:', error);
+    res.status(500).json({
+      error: '실패한 로그 목록 조회에 실패했습니다',
+      message: error.message
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/logs/pending:
+ *   get:
+ *     summary: 처리 중인 로그 목록 조회
+ *     description: 현재 처리 중인 로그들의 상세 정보를 조회합니다.
+ *     tags:
+ *       - Monitoring
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: 처리 중인 로그 목록 조회 성공
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *       401:
+ *         description: 인증 실패
+ *       500:
+ *         description: 서버 에러
+ */
+// GET /api/logs/pending - 처리 중인 로그 목록 조회
+router.get('/pending', async (req, res) => {
+  try {
+    const pendingLogs = logMemoryStore.getPendingLogs();
+    
+    res.json({
+      success: true,
+      data: pendingLogs.map(log => ({
+        logId: log.logId,
+        type: log.type,
+        message: log.message?.slice(0, 100) + (log.message?.length > 100 ? '...' : ''),
+        level: log.level,
+        retryCount: log.retryCount,
+        batchId: log.batchId,
+        processingStartedAt: log.processingStartedAt,
+        processingDuration: Date.now() - log.processingStartedAt,
+        createdAt: log.createdAt
+      })),
+      count: pendingLogs.length,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('처리 중인 로그 목록 조회 실패:', error);
+    res.status(500).json({
+      error: '처리 중인 로그 목록 조회에 실패했습니다',
       message: error.message
     });
   }

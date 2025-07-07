@@ -207,8 +207,13 @@ export const getPartitionList = async () => {
   }
 };
 
-// 배치 삽입 함수
+// 배치 삽입 함수 (트랜잭션 기반으로 완전 개선)
 export const batchInsert = async (logs) => {
+  if (!logs || logs.length === 0) {
+    return [];
+  }
+
+  let transaction = null;
   try {
     const currentTable = getCurrentTableName();
     
@@ -217,19 +222,60 @@ export const batchInsert = async (logs) => {
       await ensureCurrentMonthPartition();
     }
     
-    // 각 로그를 개별적으로 삽입
-    const results = [];
-    for (const log of logs) {
-      const result = await sql.unsafe(`
-        INSERT INTO ${currentTable} (level, type, message, metadata) 
-        VALUES ($1, $2, $3, $4)
-      `, [log.level, log.type, log.message, log.metadata]);
-      results.push(result);
+    // 트랜잭션 시작
+    transaction = await sql.begin();
+    console.log(`🔄 트랜잭션 시작 - ${logs.length}개 로그 일괄 처리`);
+    
+    // 벌크 삽입을 위한 데이터 준비
+    const values = logs.map(log => [
+      log.level || 'info',
+      log.type,
+      log.message,
+      log.metadata || null
+    ]);
+    
+    // 벌크 삽입 실행 (트랜잭션 내에서)
+    const result = await transaction.unsafe(`
+      INSERT INTO ${currentTable} (level, type, message, metadata)
+      SELECT * FROM UNNEST(
+        $1::VARCHAR[],
+        $2::VARCHAR[],
+        $3::TEXT[],
+        $4::JSONB[]
+      )
+    `, [
+      values.map(v => v[0]),  // levels
+      values.map(v => v[1]),  // types
+      values.map(v => v[2]),  // messages
+      values.map(v => v[3])   // metadata
+    ]);
+    
+    // 트랜잭션 커밋
+    await transaction.commit();
+    console.log(`✅ 트랜잭션 커밋 완료 - ${logs.length}개 로그 저장 성공`);
+    
+    return result;
+    
+  } catch (error) {
+    // 트랜잭션 롤백
+    if (transaction) {
+      try {
+        await transaction.rollback();
+        console.log(`🔄 트랜잭션 롤백 완료 - ${logs.length}개 로그 저장 실패`);
+      } catch (rollbackError) {
+        console.error('❌ 트랜잭션 롤백 실패:', rollbackError);
+      }
     }
     
-    return results;
-  } catch (error) {
-    console.error('❌ 배치 삽입 실패:', error);
+    // 에러 세부 정보 로깅
+    console.error('❌ 배치 삽입 실패 상세:', {
+      errorMessage: error.message,
+      errorCode: error.code,
+      logsCount: logs.length,
+      tableName: getCurrentTableName(),
+      timestamp: new Date().toISOString()
+    });
+    
     throw error;
   }
 };
@@ -304,15 +350,60 @@ export const cleanupOldData = async (monthsToKeep = 6) => {
   return;
 };
 
-// 연결 테스트
+// 연결 상태 모니터링 개선
 export const testConnection = async () => {
   try {
-    await sql`SELECT 1`;
-    console.log('✅ 데이터베이스 연결 성공');
+    const startTime = Date.now();
+    await sql`SELECT 1 as health_check, NOW() as server_time`;
+    const endTime = Date.now();
+    const responseTime = endTime - startTime;
+    
+    console.log(`✅ 데이터베이스 연결 성공 (응답시간: ${responseTime}ms)`);
+    
+    // 응답 시간이 5초 이상이면 경고
+    if (responseTime > 5000) {
+      console.warn(`⚠️  데이터베이스 응답이 느립니다 (${responseTime}ms)`);
+    }
+    
     return true;
   } catch (error) {
-    console.error('❌ 데이터베이스 연결 실패:', error);
+    console.error('❌ 데이터베이스 연결 실패 상세:', {
+      errorMessage: error.message,
+      errorCode: error.code,
+      timestamp: new Date().toISOString()
+    });
     return false;
+  }
+};
+
+// 데이터베이스 연결 상태 주기적 모니터링
+let healthCheckInterval = null;
+
+export const startConnectionMonitoring = () => {
+  if (healthCheckInterval) {
+    clearInterval(healthCheckInterval);
+  }
+  
+  // 5분마다 연결 상태 확인
+  healthCheckInterval = setInterval(async () => {
+    try {
+      const isHealthy = await testConnection();
+      if (!isHealthy) {
+        console.error('❌ 데이터베이스 연결 상태 불량 - 로그 저장에 문제가 발생할 수 있습니다');
+      }
+    } catch (error) {
+      console.error('❌ 연결 상태 모니터링 중 에러:', error);
+    }
+  }, 5 * 60 * 1000); // 5분
+  
+  console.log('🔍 데이터베이스 연결 상태 모니터링 시작 (5분 간격)');
+};
+
+export const stopConnectionMonitoring = () => {
+  if (healthCheckInterval) {
+    clearInterval(healthCheckInterval);
+    healthCheckInterval = null;
+    console.log('🔍 데이터베이스 연결 상태 모니터링 종료');
   }
 };
 

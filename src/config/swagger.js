@@ -7,10 +7,6 @@ const options = {
       title: 'Shiba Log Server API',
       version: '1.0.0',
       description: '시바 로그 수집 서버의 REST API 문서입니다.',
-      contact: {
-        name: 'Shiba Team',
-        email: 'support@shiba.com'
-      }
     },
     servers: [
       {
