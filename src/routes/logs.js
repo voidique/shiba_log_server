@@ -313,6 +313,7 @@ router.get('/', async (req, res) => {
       endDate: req.query.endDate ? new Date(req.query.endDate) : undefined,
       page: parseInt(req.query.page) || 1,
       limit: Math.min(parseInt(req.query.limit) || 50, 1000), // 최대 1000개 제한
+      sortBy: req.query.sortBy || 'combined' // 'combined', 'memory', 'database'
     };
 
     // 메모리에서 로그 조회 (버퍼된 로그들)
@@ -320,42 +321,83 @@ router.get('/', async (req, res) => {
 
     // DB에서 로그 조회 (이미 저장된 로그들)
     let dbResult = null;
+    let dbLogs = [];
     try {
       const offset = (filters.page - 1) * filters.limit;
-      const dbLogs = await queryLogs({
+      const queryResult = await queryLogs({
         ...filters,
         offset
       });
       
+      dbLogs = queryResult.map(({ total_count, ...log }) => ({
+        ...log,
+        source: 'database'
+      }));
+      
       dbResult = {
-        records: dbLogs.map(({ total_count, ...log }) => log),
-        total: dbLogs.length > 0 ? dbLogs[0].total_count : 0,
+        records: dbLogs,
+        total: queryResult.length > 0 ? queryResult[0].total_count : 0,
         page: filters.page,
-        totalPages: dbLogs.length > 0 ? Math.ceil(dbLogs[0].total_count / filters.limit) : 0
+        totalPages: queryResult.length > 0 ? Math.ceil(queryResult[0].total_count / filters.limit) : 0
       };
     } catch (dbError) {
       console.error('DB 로그 조회 중 에러:', dbError);
+      dbResult = {
+        records: [],
+        total: 0,
+        page: filters.page,
+        totalPages: 0
+      };
     }
 
-    res.json({
+    // 통합 정렬된 결과 생성
+    let combinedLogs = [];
+    if (filters.sortBy === 'combined') {
+      // 메모리와 DB 로그를 시간순으로 통합 정렬
+      const memoryLogs = memoryResult.records.filter(log => !log.total_count); // 메모리 로그만 필터링
+      combinedLogs = logMemoryStore.mergeAndSortLogs(
+        memoryLogs, 
+        dbLogs, 
+        filters.limit
+      );
+    }
+
+    const responseData = {
       success: true,
       data: {
-        memory: memoryResult,
-        database: dbResult,
+        // 통합 정렬 결과 (기본)
         combined: {
+          records: combinedLogs,
+          total: memoryResult.total + (dbResult?.total || 0),
           totalMemoryLogs: memoryResult.total,
           totalDatabaseLogs: dbResult?.total || 0,
-          bufferSize: logMemoryStore.getBufferSize()
+          bufferSize: logMemoryStore.getBufferSize(),
+          sortedBy: 'created_at_desc'
+        },
+        // 개별 결과 (필요시 참조용)
+        memory: memoryResult,
+        database: dbResult,
+        // 메타 정보
+        meta: {
+          query: filters,
+          timestamp: new Date().toISOString(),
+          explanation: {
+            created_at: '로그가 생성된 시간 (클라이언트 요청 시간)',
+            logged_at: '로그가 DB에 실제 저장된 시간',
+            source: 'memory: 아직 처리되지 않은 버퍼 로그, database: 이미 저장된 로그'
+          }
         }
-      },
-      timestamp: new Date().toISOString()
-    });
+      }
+    };
+
+    res.json(responseData);
 
   } catch (error) {
     console.error('로그 조회 실패:', error);
     res.status(500).json({
       error: '로그 조회에 실패했습니다',
-      message: error.message
+      message: error.message,
+      timestamp: new Date().toISOString()
     });
   }
 });

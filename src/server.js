@@ -5,7 +5,7 @@ import compression from 'compression';
 import dotenv from 'dotenv';
 import swaggerUi from 'swagger-ui-express';
 import { logRequest, errorHandler } from './middleware/auth.js';
-import { createPartitionTable, testConnection, startPartitionScheduler, getCurrentTableName, startConnectionMonitoring, stopConnectionMonitoring } from './config/database.js';
+import { createPartitionTable, testConnection, startPartitionScheduler, getCurrentTableName, startConnectionMonitoring, stopConnectionMonitoring, addTimestampFields } from './config/database.js';
 import { swaggerSpec } from './config/swagger.js';
 import logsRouter from './routes/logs.js';
 

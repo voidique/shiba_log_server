@@ -27,6 +27,73 @@ export const getCurrentTableName = () => {
   return USE_PARTITIONED_TABLE ? PARTITIONED_TABLE_NAME : LEGACY_TABLE_NAME;
 };
 
+// 테이블에 새로운 시간 필드 추가 (created_at, logged_at)
+export const addTimestampFields = async () => {
+  try {
+    console.log('🕒 테이블에 새로운 시간 필드 추가 중...');
+    
+    // 기존 테이블에 새 필드 추가
+    await sql.unsafe(`
+      ALTER TABLE ${LEGACY_TABLE_NAME} 
+      ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS logged_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    `);
+    
+    // 기존 데이터의 created_at을 timestamp 값으로 설정 (null인 경우만)
+    await sql.unsafe(`
+      UPDATE ${LEGACY_TABLE_NAME} 
+      SET created_at = timestamp 
+      WHERE created_at IS NULL
+    `);
+    
+    // 파티션 테이블도 존재한다면 같은 작업 수행
+    const partitionTableExists = await sql`
+      SELECT tablename FROM pg_tables 
+      WHERE tablename = ${PARTITIONED_TABLE_NAME} AND schemaname = 'public'
+    `;
+    
+    if (partitionTableExists.length > 0) {
+      await sql.unsafe(`
+        ALTER TABLE ${PARTITIONED_TABLE_NAME} 
+        ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS logged_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      `);
+      
+      await sql.unsafe(`
+        UPDATE ${PARTITIONED_TABLE_NAME} 
+        SET created_at = timestamp 
+        WHERE created_at IS NULL
+      `);
+      
+      console.log('✅ 파티션 테이블에도 새 시간 필드 추가 완료');
+    }
+    
+    // 새 필드들에 인덱스 추가
+    await sql.unsafe(`
+      CREATE INDEX IF NOT EXISTS idx_${LEGACY_TABLE_NAME}_created_at ON ${LEGACY_TABLE_NAME}(created_at)
+    `);
+    await sql.unsafe(`
+      CREATE INDEX IF NOT EXISTS idx_${LEGACY_TABLE_NAME}_logged_at ON ${LEGACY_TABLE_NAME}(logged_at)
+    `);
+    
+    if (partitionTableExists.length > 0) {
+      await sql.unsafe(`
+        CREATE INDEX IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_created_at ON ${PARTITIONED_TABLE_NAME}(created_at)
+      `);
+      await sql.unsafe(`
+        CREATE INDEX IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_logged_at ON ${PARTITIONED_TABLE_NAME}(logged_at)
+      `);
+    }
+    
+    console.log('✅ 새로운 시간 필드 및 인덱스 추가 완료');
+    console.log('📝 created_at: 로그 생성 시간, logged_at: 실제 DB 저장 시간');
+    
+  } catch (error) {
+    console.error('❌ 시간 필드 추가 실패:', error);
+    throw error;
+  }
+};
+
 // 파티션 테이블 생성 및 초기 설정
 export const createPartitionTable = async () => {
   try {
@@ -34,7 +101,10 @@ export const createPartitionTable = async () => {
       console.log('ℹ️  파티션 테이블 사용 안함 - 기존 테이블 사용');
       console.log(`📋 현재 사용 테이블: ${LEGACY_TABLE_NAME}`);
       
-      // 기존 테이블에 인덱스만 추가
+      // 시간 필드 추가
+      await addTimestampFields();
+      
+      // 기존 테이블에 인덱스 추가
       await sql.unsafe(`
         CREATE INDEX IF NOT EXISTS idx_game_logs_timestamp ON ${LEGACY_TABLE_NAME}(timestamp)
       `);
@@ -45,7 +115,7 @@ export const createPartitionTable = async () => {
         CREATE INDEX IF NOT EXISTS idx_game_logs_level ON ${LEGACY_TABLE_NAME}(level)
       `);
       
-      console.log('✅ 기존 테이블 인덱스 설정 완료');
+      console.log('✅ 기존 테이블 설정 완료');
       return;
     }
 
@@ -70,6 +140,8 @@ export const createPartitionTable = async () => {
         CREATE TABLE ${PARTITIONED_TABLE_NAME} (
           id BIGSERIAL,
           timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+          created_at TIMESTAMPTZ NOT NULL,
+          logged_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
           level VARCHAR(10) NOT NULL,
           type VARCHAR(50) NOT NULL,
           message TEXT NOT NULL,
@@ -77,12 +149,18 @@ export const createPartitionTable = async () => {
           PRIMARY KEY (timestamp, id)
         ) PARTITION BY RANGE (timestamp)
       `);
-      console.log('✅ 파티션 테이블 생성 완료');
+      console.log('✅ 파티션 테이블 생성 완료 (created_at, logged_at 필드 포함)');
     }
 
     // 파티션 테이블 인덱스 생성
     await sql.unsafe(`
       CREATE INDEX IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_timestamp ON ${PARTITIONED_TABLE_NAME}(timestamp)
+    `);
+    await sql.unsafe(`
+      CREATE INDEX IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_created_at ON ${PARTITIONED_TABLE_NAME}(created_at)
+    `);
+    await sql.unsafe(`
+      CREATE INDEX IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_logged_at ON ${PARTITIONED_TABLE_NAME}(logged_at)
     `);
     await sql.unsafe(`
       CREATE INDEX IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_type ON ${PARTITIONED_TABLE_NAME}(type)
@@ -91,7 +169,7 @@ export const createPartitionTable = async () => {
       CREATE INDEX IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_level ON ${PARTITIONED_TABLE_NAME}(level)
     `);
 
-    console.log('✅ 파티션 테이블 및 인덱스 설정 완료');
+    console.log('✅ 파티션 테이블 및 인덱스 설정 완료 (created_at, logged_at 인덱스 포함)');
     console.log('📅 월별 파티션 생성을 시작합니다...');
     await createInitialPartitions();
 
@@ -231,23 +309,29 @@ export const batchInsert = async (logs) => {
       log.level || 'info',
       log.type,
       log.message,
-      log.metadata || null
+      log.metadata || null,
+      log.createdAt ? new Date(log.createdAt) : new Date(),  // created_at: 로그 생성 시간
+      new Date()  // logged_at: 현재 시간 (실제 DB 저장 시간)
     ]);
     
     // 벌크 삽입 실행 (트랜잭션 내에서)
     const result = await transaction.unsafe(`
-      INSERT INTO ${currentTable} (level, type, message, metadata)
+      INSERT INTO ${currentTable} (level, type, message, metadata, created_at, logged_at)
       SELECT * FROM UNNEST(
         $1::VARCHAR[],
         $2::VARCHAR[],
         $3::TEXT[],
-        $4::JSONB[]
+        $4::JSONB[],
+        $5::TIMESTAMPTZ[],
+        $6::TIMESTAMPTZ[]
       )
     `, [
       values.map(v => v[0]),  // levels
       values.map(v => v[1]),  // types
       values.map(v => v[2]),  // messages
-      values.map(v => v[3])   // metadata
+      values.map(v => v[3]),  // metadata
+      values.map(v => v[4]),  // created_at
+      values.map(v => v[5])   // logged_at
     ]);
     
     // 트랜잭션 커밋
@@ -310,11 +394,11 @@ export const queryLogs = async (filters = {}) => {
       params.push(`%${message}%`);
     }
     if (startDate) {
-      conditions.push('timestamp >= $' + (params.length + 1));
+      conditions.push('created_at >= $' + (params.length + 1));
       params.push(startDate);
     }
     if (endDate) {
-      conditions.push('timestamp <= $' + (params.length + 1));
+      conditions.push('created_at <= $' + (params.length + 1));
       params.push(endDate);
     }
 
@@ -322,13 +406,22 @@ export const queryLogs = async (filters = {}) => {
     
     const query = `
       WITH filtered_logs AS (
-        SELECT * FROM ${currentTable} ${whereClause}
+        SELECT 
+          id,
+          timestamp,
+          created_at,
+          logged_at,
+          level,
+          type,
+          message,
+          metadata
+        FROM ${currentTable} ${whereClause}
       )
       SELECT 
         (SELECT COUNT(*) FROM filtered_logs) as total_count,
         fl.*
       FROM filtered_logs fl
-      ORDER BY timestamp DESC
+      ORDER BY created_at DESC, logged_at DESC
       LIMIT $${params.length + 1}
       OFFSET $${params.length + 2}
     `;

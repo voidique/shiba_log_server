@@ -54,16 +54,18 @@ export class LogMemoryStore {
 
   async addLog(log) {
     // 고유 ID와 타임스탬프 추가
+    const now = new Date();
     const logWithId = {
       ...log,
       logId: randomUUID(),           // 고유 ID 추가
-      timestamp: new Date(),         // 타임스탬프
+      timestamp: now,                // 기존 timestamp (호환성)
+      createdAt: now.getTime(),      // 생성 시간 (밀리초) - DB의 created_at에 사용
+      addedToBufferAt: now,          // 버퍼에 추가된 시간
       retryCount: 0,                 // 재시도 횟수
-      createdAt: Date.now(),         // 생성 시간 (밀리초)
     };
 
     this.buffer.push(logWithId);
-    console.log(`📝 로그 추가됨 [ID: ${logWithId.logId.slice(0, 8)}...] (버퍼 크기: ${this.buffer.length}/${this.BATCH_SIZE})`);
+    console.log(`📝 로그 추가됨 [ID: ${logWithId.logId.slice(0, 8)}...] (생성시간: ${now.toISOString()}) (버퍼 크기: ${this.buffer.length}/${this.BATCH_SIZE})`);
 
     // 배치 크기에 도달하면 즉시 처리
     if (this.buffer.length >= this.BATCH_SIZE) {
@@ -211,14 +213,19 @@ export class LogMemoryStore {
     if (filters.level) {
       filteredLogs = filteredLogs.filter(log => log.level === filters.level);
     }
+    if (filters.message) {
+      filteredLogs = filteredLogs.filter(log => 
+        log.message && log.message.toLowerCase().includes(filters.message.toLowerCase())
+      );
+    }
     if (filters.startDate) {
       filteredLogs = filteredLogs.filter(
-        log => new Date(log.timestamp) >= new Date(filters.startDate)
+        log => new Date(log.createdAt) >= new Date(filters.startDate)
       );
     }
     if (filters.endDate) {
       filteredLogs = filteredLogs.filter(
-        log => new Date(log.timestamp) <= new Date(filters.endDate)
+        log => new Date(log.createdAt) <= new Date(filters.endDate)
       );
     }
 
@@ -228,14 +235,92 @@ export class LogMemoryStore {
     const limit = filters.limit || 50;
     const offset = (page - 1) * limit;
 
+    // created_at 기준으로 정렬하고, 메모리 로그 표시 추가
+    const sortedLogs = filteredLogs
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      .slice(offset, offset + limit)
+      .map(log => ({
+        ...log,
+        created_at: new Date(log.createdAt).toISOString(),
+        logged_at: null, // 아직 DB에 저장되지 않음
+        source: 'memory' // 메모리에서 온 로그임을 표시
+      }));
+
     return {
-      records: filteredLogs
-        .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
-        .slice(offset, offset + limit),
+      records: sortedLogs,
       total,
       page,
       totalPages: Math.ceil(total / limit),
     };
+  }
+
+  // DB 결과와 메모리 결과를 시간순으로 통합 정렬하는 새로운 메서드
+  mergeAndSortLogs(memoryLogs = [], dbLogs = [], limit = 50) {
+    try {
+      const allLogs = [];
+      
+      // 메모리 로그 추가 (created_at 기준)
+      if (Array.isArray(memoryLogs)) {
+        memoryLogs.forEach(log => {
+          try {
+            allLogs.push({
+              ...log,
+              created_at: log.createdAt ? new Date(log.createdAt).toISOString() : new Date().toISOString(),
+              logged_at: null,
+              source: 'memory'
+            });
+          } catch (error) {
+            console.warn('⚠️ 메모리 로그 처리 중 에러:', error.message, 'logId:', log.logId);
+          }
+        });
+      }
+      
+      // DB 로그 추가
+      if (Array.isArray(dbLogs)) {
+        dbLogs.forEach(log => {
+          try {
+            allLogs.push({
+              ...log,
+              source: 'database'
+            });
+          } catch (error) {
+            console.warn('⚠️ DB 로그 처리 중 에러:', error.message, 'logId:', log.id);
+          }
+        });
+      }
+      
+      // created_at 기준으로 최신순 정렬
+      const sortedLogs = allLogs.sort((a, b) => {
+        try {
+          const timeA = new Date(a.created_at || a.timestamp);
+          const timeB = new Date(b.created_at || b.timestamp);
+          
+          // 유효하지 않은 날짜 처리
+          if (isNaN(timeA.getTime()) || isNaN(timeB.getTime())) {
+            console.warn('⚠️ 유효하지 않은 날짜 발견:', { 
+              aTime: a.created_at || a.timestamp, 
+              bTime: b.created_at || b.timestamp 
+            });
+            return 0;
+          }
+          
+          return timeB - timeA;
+        } catch (error) {
+          console.warn('⚠️ 로그 정렬 중 에러:', error.message);
+          return 0;
+        }
+      });
+      
+      // 제한된 개수만 반환
+      const result = sortedLogs.slice(0, Math.max(1, Math.min(limit, 1000)));
+      
+      console.log(`📊 통합 정렬 완료: 메모리 ${memoryLogs.length}개 + DB ${dbLogs.length}개 → ${result.length}개 반환`);
+      return result;
+      
+    } catch (error) {
+      console.error('❌ 로그 통합 정렬 중 에러:', error);
+      return []; // 에러 시 빈 배열 반환
+    }
   }
 
   getBufferSize() {
