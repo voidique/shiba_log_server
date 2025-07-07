@@ -411,14 +411,23 @@ export const batchInsert = async (logs) => {
     console.log(`🔄 트랜잭션 시작 - ${logs.length}개 로그 일괄 처리`);
     
     // 벌크 삽입을 위한 데이터 준비
-    const values = logs.map(log => [
-      log.level || 'info',
-      log.type,
-      log.message,
-      log.metadata || null,
-      log.createdAt ? new Date(log.createdAt) : new Date(),  // created_at: 로그 생성 시간
-      new Date()  // logged_at: 현재 시간 (실제 DB 저장 시간)
-    ]);
+    const values = logs.map(raw => {
+      const level = typeof raw.level === 'string' && raw.level.trim() !== '' ? raw.level.trim() : 'info'
+      const type = String(raw.type || '').trim()
+      const message = String(raw.message || '').trim()
+      // NOTE: metadata 가 undefined 이면 null, 객체면 그대로, 문자열이면 JSON.parse 시도 후 실패 시 그대로 문자열
+      let metadata = null
+      if (raw.metadata !== undefined && raw.metadata !== null) {
+        if (typeof raw.metadata === 'object') metadata = raw.metadata
+        else {
+          try { metadata = JSON.parse(raw.metadata) } catch { metadata = String(raw.metadata) }
+        }
+      }
+      const createdAt = raw.createdAt ? new Date(raw.createdAt) : new Date()
+      const loggedAt = new Date()
+
+      return [level, type, message, metadata, createdAt, loggedAt]
+    })
     
     // 벌크 삽입 실행 (트랜잭션 내에서)
     const result = await transaction.unsafe(`
