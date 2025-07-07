@@ -7,14 +7,8 @@ const sql = postgres(process.env.SHIBA_LOG_DATABASE_URL || '', {
   max: 20,
   idle_timeout: 30,
   connect_timeout: 10,
-  types: {
-    jsonb: {
-      to: 1114,
-      from: [3802],
-      serialize: JSON.stringify,
-      parse: JSON.parse,
-    },
-  },
+  // 기본 타입 매핑(특히 JSONB)은 postgres.js가 이미 올바르게 처리하므로
+  // 커스텀 매핑을 제거해 드라이버 기본 동작을 사용한다.
 });
 
 // 설정: 사용할 테이블 선택
