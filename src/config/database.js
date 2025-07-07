@@ -443,7 +443,7 @@ export const batchInsert = async (logs) => {
     `
     
     // 트랜잭션 커밋
-    await transaction.commit;
+    await transaction.commit();
     console.log(`✅ 트랜잭션 커밋 완료 - ${logs.length}개 로그 저장 성공`);
     
     return result;
@@ -452,7 +452,7 @@ export const batchInsert = async (logs) => {
     // 트랜잭션 롤백
     if (transaction) {
       try {
-        await transaction.rollback;
+        await transaction.rollback();
         console.log(`🔄 트랜잭션 롤백 완료 - ${logs.length}개 로그 저장 실패`);
       } catch (rollbackError) {
         console.error('❌ 트랜잭션 롤백 실패:', rollbackError);
