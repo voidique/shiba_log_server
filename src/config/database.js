@@ -424,24 +424,14 @@ export const batchInsert = async (logs) => {
     })
     
     // 벌크 삽입 실행 (트랜잭션 내에서)
-    const result = await transaction.unsafe(`
-      INSERT INTO ${currentTable} (level, type, message, metadata, created_at, logged_at)
-      SELECT * FROM UNNEST(
-        $1::VARCHAR[],
-        $2::VARCHAR[],
-        $3::TEXT[],
-        $4::JSONB[],
-        $5::TIMESTAMPTZ[],
-        $6::TIMESTAMPTZ[]
-      )
-    `, [
-      values.map(v => v[0]),  // levels
-      values.map(v => v[1]),  // types
-      values.map(v => v[2]),  // messages
-      values.map(v => v[3]),  // metadata
-      values.map(v => v[4]),  // created_at
-      values.map(v => v[5])   // logged_at
-    ]);
+    const unnestTypes = ['varchar', 'varchar', 'text', 'jsonb', 'timestamptz', 'timestamptz']
+    const unnest = sql.unnest(values, unnestTypes)
+
+    const result = await transaction`
+      INSERT INTO ${sql(currentTable)} 
+        (level, type, message, metadata, created_at, logged_at)
+      SELECT * FROM ${unnest}
+    `;
     
     // 트랜잭션 커밋
     await transaction.commit();
