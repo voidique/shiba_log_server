@@ -8,7 +8,7 @@ const router = express.Router();
 // 모든 로그 관련 엔드포인트에 API 키 인증 적용
 router.use(validateApiKey);
 
-/**
+/**d
  * @swagger
  * /api/logs:
  *   post:
