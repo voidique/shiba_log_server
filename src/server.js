@@ -5,7 +5,7 @@ import compression from 'compression';
 import dotenv from 'dotenv';
 import swaggerUi from 'swagger-ui-express';
 import { logRequest, errorHandler } from './middleware/auth.js';
-import { createPartitionTable, testConnection, startPartitionScheduler, getCurrentTableName, startConnectionMonitoring, stopConnectionMonitoring, addTimestampFields } from './config/database.js';
+import { createPartitionTable, testConnection, startPartitionScheduler, getCurrentTableName, startConnectionMonitoring, stopConnectionMonitoring, addTimestampFields, migrateAllPartitions, verifySystemHealth, autoRepairSystem } from './config/database.js';
 import { swaggerSpec } from './config/swagger.js';
 import logsRouter from './routes/logs.js';
 
@@ -86,7 +86,9 @@ app.use('*', (req, res) => {
       'POST /api/logs/switch-to-legacy - 레거시 테이블 전환',
       'POST /api/logs/retry-failed - 실패한 로그 재시도',
       'GET /api/logs/failed - 실패한 로그 목록 조회',
-      'GET /api/logs/pending - 처리 중인 로그 목록 조회'
+      'GET /api/logs/pending - 처리 중인 로그 목록 조회',
+      'GET /api/logs/system/verify - 시스템 상태 검증',
+      'POST /api/logs/system/repair - 시스템 자동 복구'
     ]
   });
 });
@@ -121,6 +123,20 @@ async function startServer() {
     // 파티션 테이블 생성
     console.log('📊 파티션 테이블 설정 중...');
     await createPartitionTable();
+
+    // 시스템 상태 검증 및 자동 복구
+    console.log('🔍 시스템 상태 검증 중...');
+    const isHealthy = await verifySystemHealth();
+    
+    if (!isHealthy) {
+      console.log('⚠️  시스템 문제 발견 - 자동 복구 시작...');
+      const repaired = await autoRepairSystem();
+      
+      if (!repaired) {
+        console.error('❌ 시스템 자동 복구 실패 - 수동 개입이 필요할 수 있습니다');
+        // 하지만 서버는 계속 실행합니다
+      }
+    }
 
     // 파티션 스케줄러 시작
     console.log('📅 파티션 스케줄러 시작 중...');
@@ -159,6 +175,8 @@ async function startServer() {
       console.log('   POST /api/logs/retry-failed - 실패한 로그 재시도');
       console.log('   GET  /api/logs/failed - 실패한 로그 목록 조회');
       console.log('   GET  /api/logs/pending - 처리 중인 로그 목록 조회');
+      console.log('   GET  /api/logs/system/verify - 시스템 상태 검증');
+      console.log('   POST /api/logs/system/repair - 시스템 자동 복구');
       console.log('');
       console.log('🔑 모든 /api/logs 엔드포인트는 x-api-key 헤더가 필요합니다.');
       console.log('');

@@ -1,6 +1,6 @@
 import express from 'express';
 import { logMemoryStore } from '../services/log-memory-store.js';
-import { queryLogs, cleanupOldData, getPartitionList, getCurrentTableName, switchToPartitionedTable, switchToLegacyTable } from '../config/database.js';
+import { queryLogs, cleanupOldData, getPartitionList, getCurrentTableName, switchToPartitionedTable, switchToLegacyTable, verifySystemHealth, autoRepairSystem } from '../config/database.js';
 import { validateApiKey } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -1037,6 +1037,120 @@ router.get('/pending', async (req, res) => {
     res.status(500).json({
       error: '처리 중인 로그 목록 조회에 실패했습니다',
       message: error.message
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/logs/system/verify:
+ *   get:
+ *     summary: 시스템 상태 검증
+ *     description: 전체 시스템의 상태를 심층적으로 검증합니다.
+ *     tags:
+ *       - System
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: 시스템 검증 결과
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 healthy:
+ *                   type: boolean
+ *                   description: 시스템 정상 여부
+ *                 checks:
+ *                   type: object
+ *                   description: 각 구성 요소별 검증 결과
+ *                 issues:
+ *                   type: array
+ *                   items:
+ *                     type: string
+ *                   description: 발견된 문제 목록
+ *       401:
+ *         description: 인증 실패
+ *       500:
+ *         description: 서버 에러
+ */
+// GET /api/logs/system/verify - 시스템 상태 검증
+router.get('/system/verify', async (req, res) => {
+  try {
+    console.log('🔍 API를 통한 시스템 검증 요청');
+    const isHealthy = await verifySystemHealth();
+    
+    res.json({
+      success: true,
+      healthy: isHealthy,
+      message: isHealthy 
+        ? '모든 시스템 구성 요소가 정상입니다' 
+        : '시스템에 문제가 발견되었습니다. 서버 로그를 확인하세요.',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('시스템 검증 API 에러:', error);
+    res.status(500).json({
+      error: '시스템 검증에 실패했습니다',
+      message: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/logs/system/repair:
+ *   post:
+ *     summary: 시스템 자동 복구
+ *     description: 발견된 시스템 문제를 자동으로 복구합니다.
+ *     tags:
+ *       - System
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: 복구 결과
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 repaired:
+ *                   type: boolean
+ *                   description: 복구 성공 여부
+ *                 message:
+ *                   type: string
+ *       401:
+ *         description: 인증 실패
+ *       500:
+ *         description: 서버 에러
+ */
+// POST /api/logs/system/repair - 시스템 자동 복구
+router.post('/system/repair', async (req, res) => {
+  try {
+    console.log('🔧 API를 통한 시스템 복구 요청');
+    const repaired = await autoRepairSystem();
+    
+    res.json({
+      success: true,
+      repaired,
+      message: repaired 
+        ? '시스템이 성공적으로 복구되었습니다' 
+        : '일부 문제가 자동 복구되지 않았습니다. 수동 개입이 필요할 수 있습니다.',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('시스템 복구 API 에러:', error);
+    res.status(500).json({
+      error: '시스템 복구에 실패했습니다',
+      message: error.message,
+      timestamp: new Date().toISOString()
     });
   }
 });

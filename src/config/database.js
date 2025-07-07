@@ -94,6 +94,70 @@ export const addTimestampFields = async () => {
   }
 };
 
+// 모든 파티션 테이블에 새로운 시간 필드 추가
+export const migrateAllPartitions = async () => {
+  try {
+    console.log('🔄 모든 파티션 테이블 마이그레이션 시작...');
+    
+    // 모든 파티션 테이블 목록 조회 (월별 파티션 패턴)
+    const partitions = await sql`
+      SELECT tablename 
+      FROM pg_tables 
+      WHERE tablename ~ ${`^${PARTITIONED_TABLE_NAME}_[0-9]{4}_[0-9]{2}$`}
+      AND schemaname = 'public'
+      ORDER BY tablename
+    `;
+    
+    if (partitions.length === 0) {
+      console.log('📝 마이그레이션할 파티션 테이블이 없습니다.');
+      return;
+    }
+    
+    console.log(`📊 발견된 파티션 테이블: ${partitions.length}개`);
+    
+    for (const partition of partitions) {
+      const tableName = partition.tablename;
+      console.log(`🔧 파티션 마이그레이션 중: ${tableName}`);
+      
+      try {
+        // 각 파티션에 새 컬럼 추가
+        await sql.unsafe(`
+          ALTER TABLE ${tableName} 
+          ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ,
+          ADD COLUMN IF NOT EXISTS logged_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+        `);
+        
+        // 기존 데이터의 created_at을 timestamp 값으로 설정
+        await sql.unsafe(`
+          UPDATE ${tableName} 
+          SET created_at = timestamp 
+          WHERE created_at IS NULL
+        `);
+        
+        // 인덱스 추가
+        await sql.unsafe(`
+          CREATE INDEX IF NOT EXISTS idx_${tableName}_created_at ON ${tableName}(created_at)
+        `);
+        await sql.unsafe(`
+          CREATE INDEX IF NOT EXISTS idx_${tableName}_logged_at ON ${tableName}(logged_at)
+        `);
+        
+        console.log(`✅ ${tableName} 마이그레이션 완료`);
+        
+      } catch (error) {
+        console.error(`❌ ${tableName} 마이그레이션 실패:`, error.message);
+        // 에러가 발생해도 다른 파티션은 계속 처리
+      }
+    }
+    
+    console.log('✅ 모든 파티션 테이블 마이그레이션 완료!');
+    
+  } catch (error) {
+    console.error('❌ 파티션 마이그레이션 중 에러:', error);
+    throw error;
+  }
+};
+
 // 파티션 테이블 생성 및 초기 설정
 export const createPartitionTable = async () => {
   try {
@@ -172,6 +236,10 @@ export const createPartitionTable = async () => {
     console.log('✅ 파티션 테이블 및 인덱스 설정 완료 (created_at, logged_at 인덱스 포함)');
     console.log('📅 월별 파티션 생성을 시작합니다...');
     await createInitialPartitions();
+    
+    // 모든 기존 파티션 테이블 마이그레이션
+    console.log('🔄 기존 파티션 테이블 마이그레이션 시작...');
+    await migrateAllPartitions();
 
   } catch (error) {
     console.error('❌ 파티션 테이블 생성 실패:', error);
@@ -206,6 +274,38 @@ const createInitialPartitions = async () => {
   await createMonthlyPartition(nextMonth);
 };
 
+// 파티션 구조 검증 함수
+const verifyPartitionStructure = async (partitionName) => {
+  try {
+    // 파티션의 컬럼 목록 확인
+    const columns = await sql`
+      SELECT column_name, data_type
+      FROM information_schema.columns
+      WHERE table_name = ${partitionName}
+      AND table_schema = 'public'
+      AND column_name IN ('created_at', 'logged_at')
+    `;
+    
+    if (columns.length !== 2) {
+      console.warn(`⚠️ ${partitionName} 파티션에 필수 시간 필드가 누락되었습니다.`);
+      
+      // 누락된 필드 추가
+      await sql.unsafe(`
+        ALTER TABLE ${partitionName} 
+        ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS logged_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      `);
+      
+      console.log(`✅ ${partitionName}에 누락된 시간 필드 추가 완료`);
+    }
+    
+    return true;
+  } catch (error) {
+    console.error(`❌ 파티션 구조 검증 실패 (${partitionName}):`, error);
+    return false;
+  }
+};
+
 // 월별 파티션 생성
 export const createMonthlyPartition = async (date) => {
   if (!USE_PARTITIONED_TABLE) return;
@@ -228,6 +328,8 @@ export const createMonthlyPartition = async (date) => {
 
     if (existingPartition.length > 0) {
       console.log(`⏭️  파티션 이미 존재: ${partitionName}`);
+      // 기존 파티션도 구조 검증
+      await verifyPartitionStructure(partitionName);
       return;
     }
 
@@ -238,6 +340,10 @@ export const createMonthlyPartition = async (date) => {
     `);
     
     console.log(`✅ 새 파티션 생성: ${partitionName} (${startDate.toISOString().split('T')[0]} ~ ${endDate.toISOString().split('T')[0]})`);
+    
+    // 새로 생성된 파티션 구조 검증
+    await verifyPartitionStructure(partitionName);
+    
   } catch (error) {
     console.error(`❌ 파티션 테이블 생성 실패 (${partitionName}):`, error);
   }
@@ -543,6 +649,176 @@ export const switchToLegacyTable = async () => {
   console.log('🔄 기존 테이블로 전환 중...');
   console.log('ℹ️  이 작업은 서버 재시작 후 적용됩니다');
   console.log('📝 database.js 파일에서 USE_PARTITIONED_TABLE = false로 설정하세요');
+};
+
+// 전체 시스템 검증 함수
+export const verifySystemHealth = async () => {
+  console.log('🔍 시스템 전체 상태 검증 시작...');
+  const issues = [];
+  const checks = {
+    database: false,
+    mainTable: false,
+    partitionedTable: false,
+    partitions: false,
+    columns: false,
+    indexes: false
+  };
+  
+  try {
+    // 1. 데이터베이스 연결 확인
+    console.log('📌 데이터베이스 연결 확인...');
+    const connected = await testConnection();
+    if (!connected) {
+      issues.push('❌ 데이터베이스 연결 실패');
+    } else {
+      checks.database = true;
+      console.log('✅ 데이터베이스 연결 정상');
+    }
+    
+    // 2. 메인 테이블 확인
+    console.log('📌 메인 테이블 구조 확인...');
+    const mainTableColumns = await sql`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_name = ${LEGACY_TABLE_NAME}
+      AND table_schema = 'public'
+      AND column_name IN ('id', 'timestamp', 'created_at', 'logged_at', 'level', 'type', 'message', 'metadata')
+    `;
+    
+    if (mainTableColumns.length < 8) {
+      issues.push(`❌ ${LEGACY_TABLE_NAME} 테이블에 필수 컬럼 누락`);
+    } else {
+      checks.mainTable = true;
+      console.log('✅ 메인 테이블 구조 정상');
+    }
+    
+    // 3. 파티션 테이블 확인 (사용 중인 경우)
+    if (USE_PARTITIONED_TABLE) {
+      console.log('📌 파티션 테이블 구조 확인...');
+      const partitionedTableColumns = await sql`
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_name = ${PARTITIONED_TABLE_NAME}
+        AND table_schema = 'public'
+        AND column_name IN ('id', 'timestamp', 'created_at', 'logged_at', 'level', 'type', 'message', 'metadata')
+      `;
+      
+      if (partitionedTableColumns.length < 8) {
+        issues.push(`❌ ${PARTITIONED_TABLE_NAME} 테이블에 필수 컬럼 누락`);
+      } else {
+        checks.partitionedTable = true;
+        console.log('✅ 파티션 테이블 구조 정상');
+      }
+      
+      // 4. 파티션들 확인
+      console.log('📌 개별 파티션 테이블 확인...');
+      const partitions = await sql`
+        SELECT tablename 
+        FROM pg_tables 
+        WHERE tablename ~ ${`^${PARTITIONED_TABLE_NAME}_[0-9]{4}_[0-9]{2}$`}
+        AND schemaname = 'public'
+      `;
+      
+      let partitionIssues = 0;
+      for (const partition of partitions) {
+        const partitionColumns = await sql`
+          SELECT column_name
+          FROM information_schema.columns
+          WHERE table_name = ${partition.tablename}
+          AND table_schema = 'public'
+          AND column_name IN ('created_at', 'logged_at')
+        `;
+        
+        if (partitionColumns.length < 2) {
+          partitionIssues++;
+          issues.push(`❌ ${partition.tablename} 파티션에 시간 필드 누락`);
+        }
+      }
+      
+      if (partitionIssues === 0) {
+        checks.partitions = true;
+        console.log(`✅ 모든 파티션 (${partitions.length}개) 구조 정상`);
+      }
+    }
+    
+    // 5. 인덱스 확인
+    console.log('📌 인덱스 확인...');
+    const indexes = await sql`
+      SELECT indexname 
+      FROM pg_indexes 
+      WHERE tablename IN (${LEGACY_TABLE_NAME}, ${PARTITIONED_TABLE_NAME})
+      AND schemaname = 'public'
+    `;
+    
+    const requiredIndexes = ['created_at', 'logged_at', 'timestamp', 'type', 'level'];
+    const missingIndexes = [];
+    
+    requiredIndexes.forEach(field => {
+      const hasIndex = indexes.some(idx => 
+        idx.indexname.includes(field)
+      );
+      if (!hasIndex) {
+        missingIndexes.push(field);
+      }
+    });
+    
+    if (missingIndexes.length > 0) {
+      issues.push(`❌ 누락된 인덱스: ${missingIndexes.join(', ')}`);
+    } else {
+      checks.indexes = true;
+      console.log('✅ 모든 필수 인덱스 존재');
+    }
+    
+    // 6. 최종 결과
+    console.log('\n📊 시스템 검증 결과:');
+    console.log('========================');
+    Object.entries(checks).forEach(([key, value]) => {
+      console.log(`${value ? '✅' : '❌'} ${key}: ${value ? '정상' : '문제 발견'}`);
+    });
+    
+    if (issues.length > 0) {
+      console.log('\n⚠️  발견된 문제들:');
+      issues.forEach(issue => console.log(issue));
+      return false;
+    }
+    
+    console.log('\n🎉 모든 시스템 구성 요소가 정상입니다!');
+    return true;
+    
+  } catch (error) {
+    console.error('❌ 시스템 검증 중 에러:', error);
+    return false;
+  }
+};
+
+// 자동 복구 함수
+export const autoRepairSystem = async () => {
+  console.log('🔧 시스템 자동 복구 시작...');
+  
+  try {
+    // 1. 시간 필드 추가
+    await addTimestampFields();
+    
+    // 2. 모든 파티션 마이그레이션
+    if (USE_PARTITIONED_TABLE) {
+      await migrateAllPartitions();
+    }
+    
+    // 3. 시스템 재검증
+    const isHealthy = await verifySystemHealth();
+    
+    if (isHealthy) {
+      console.log('✅ 시스템 자동 복구 완료!');
+      return true;
+    } else {
+      console.log('⚠️  일부 문제가 자동 복구되지 않았습니다.');
+      return false;
+    }
+    
+  } catch (error) {
+    console.error('❌ 시스템 자동 복구 실패:', error);
+    return false;
+  }
 };
 
 export default sql; 
