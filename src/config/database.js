@@ -439,6 +439,8 @@ export const queryLogs = async (filters = {}) => {
     message,
     startDate,
     endDate,
+    userId,
+    metadata,
     limit = 50,
     offset = 0
   } = filters;
@@ -467,6 +469,17 @@ export const queryLogs = async (filters = {}) => {
     if (endDate) {
       conditions.push('created_at <= $' + (params.length + 1));
       params.push(endDate);
+    }
+    
+    // 새로운 필터들 추가
+    if (userId) {
+      conditions.push('metadata->>\'user_id\' = $' + (params.length + 1));
+      params.push(String(userId));
+    }
+    
+    if (metadata) {
+      conditions.push('metadata::text ILIKE $' + (params.length + 1));
+      params.push(`%${metadata}%`);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';

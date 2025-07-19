@@ -47,11 +47,13 @@ const options = {
             },
             metadata: {
               type: 'object',
-              description: '추가 메타데이터',
+              description: '추가 메타데이터 (user_id 필드 포함 권장)',
               example: {
-                userId: 12345,
-                sessionId: 'abc123',
-                ip: '192.168.1.1'
+                user_id: "12345",
+                session_id: "abc123",
+                ip: "192.168.1.1",
+                action: "login",
+                device: "mobile"
               }
             }
           }
@@ -112,28 +114,61 @@ const options = {
             data: {
               type: 'object',
               properties: {
-                memory: {
-                  type: 'object',
-                  description: '메모리 버퍼의 로그들'
-                },
-                database: {
-                  type: 'object',
-                  description: '데이터베이스의 로그들'
-                },
                 combined: {
                   type: 'object',
                   properties: {
-                    totalMemoryLogs: {
-                      type: 'integer',
-                      description: '메모리 로그 총 개수'
+                    records: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          id: { type: 'integer', example: 1 },
+                          type: { type: 'string', example: 'user_action' },
+                          message: { type: 'string', example: '사용자가 로그인했습니다' },
+                          level: { type: 'string', example: 'info' },
+                          created_at: { type: 'string', format: 'date-time', description: '로그 생성 시간' },
+                          logged_at: { type: 'string', format: 'date-time', description: 'DB 저장 시간' },
+                          metadata: {
+                            type: 'object',
+                            example: {
+                              user_id: "12345",
+                              session_id: "abc123",
+                              action: "login"
+                            }
+                          },
+                          source: { type: 'string', enum: ['memory', 'database'], example: 'database' }
+                        }
+                      }
                     },
-                    totalDatabaseLogs: {
-                      type: 'integer',
-                      description: '데이터베이스 로그 총 개수'
+                    total: { type: 'integer', description: '전체 로그 개수', example: 150 },
+                    totalMemoryLogs: { type: 'integer', description: '메모리 로그 개수', example: 25 },
+                    totalDatabaseLogs: { type: 'integer', description: 'DB 로그 개수', example: 125 },
+                    bufferSize: { type: 'integer', description: '현재 버퍼 크기', example: 25 },
+                    sortedBy: { type: 'string', example: 'created_at_desc' }
+                  }
+                },
+                memory: {
+                  type: 'object',
+                  description: '메모리 버퍼의 로그들 (참조용)'
+                },
+                database: {
+                  type: 'object',
+                  description: '데이터베이스의 로그들 (참조용)'
+                },
+                meta: {
+                  type: 'object',
+                  properties: {
+                    query: {
+                      type: 'object',
+                      description: '사용된 필터 조건'
                     },
-                    bufferSize: {
-                      type: 'integer',
-                      description: '현재 버퍼 크기'
+                    explanation: {
+                      type: 'object',
+                      properties: {
+                        created_at: { type: 'string', example: '로그가 생성된 시간 (클라이언트 요청 시간)' },
+                        logged_at: { type: 'string', example: '로그가 DB에 실제 저장된 시간' },
+                        source: { type: 'string', example: 'memory: 아직 처리되지 않은 버퍼 로그, database: 이미 저장된 로그' }
+                      }
                     }
                   }
                 }

@@ -1,5 +1,7 @@
 import { batchInsert, createMonthlyPartition } from '../config/database.js';
 import { randomUUID } from 'crypto';
+import { writeFileSync, appendFileSync, existsSync } from 'fs';
+import { join } from 'path';
 
 export class LogMemoryStore {
   static instance = null;
@@ -22,6 +24,9 @@ export class LogMemoryStore {
     this.totalFailed = 0;         // 총 실패한 로그 수
     this.lastProcessedAt = null;  // 마지막 처리 시간
     this.maxRetries = 3;          // 최대 재시도 횟수
+    
+    // 에러 로그 파일 경로
+    this.errorLogPath = join(process.cwd(), 'error.txt');
 
     this.startFlushTimer();
     LogMemoryStore.instance = this;
@@ -36,6 +41,59 @@ export class LogMemoryStore {
     return LogMemoryStore.instance;
   }
 
+  // 에러 로그를 error.txt 파일에 기록하는 함수
+  writeErrorLog(error, context = {}) {
+    try {
+      const timestamp = new Date().toISOString();
+      const errorEntry = {
+        timestamp,
+        error: {
+          message: error.message,
+          stack: error.stack,
+          name: error.name
+        },
+        context,
+        serverInfo: {
+          uptime: process.uptime(),
+          memoryUsage: process.memoryUsage(),
+          nodeVersion: process.version
+        }
+      };
+
+      const logLine = `
+================================================================================
+[${timestamp}] LOG PROCESSING ERROR
+================================================================================
+Error Message: ${error.message}
+Error Type: ${error.name}
+Context: ${JSON.stringify(context, null, 2)}
+
+Stack Trace:
+${error.stack}
+
+Server Info:
+- Uptime: ${process.uptime()}s
+- Memory Usage: ${JSON.stringify(process.memoryUsage(), null, 2)}
+- Node Version: ${process.version}
+
+================================================================================
+
+`;
+
+      // 파일이 존재하지 않으면 생성, 존재하면 추가
+      if (!existsSync(this.errorLogPath)) {
+        writeFileSync(this.errorLogPath, `Shiba Log Server - Error Log\nCreated: ${timestamp}\n\n`);
+      }
+      
+      appendFileSync(this.errorLogPath, logLine);
+      
+      console.log(`📝 에러 로그가 error.txt에 기록되었습니다: ${error.message}`);
+      
+    } catch (writeError) {
+      console.error('❌ error.txt 파일 쓰기 실패:', writeError.message);
+    }
+  }
+
   startFlushTimer() {
     if (this.flushTimer) {
       clearInterval(this.flushTimer);
@@ -46,6 +104,15 @@ export class LogMemoryStore {
         await this.processBuffer();
       } catch (error) {
         console.error('⚠️ 타이머 기반 버퍼 처리 중 에러:', error);
+        
+        // 타이머 기반 처리 에러도 error.txt에 기록
+        this.writeErrorLog(error, {
+          operation: 'timerBasedFlush',
+          bufferSize: this.buffer.length,
+          flushInterval: this.FLUSH_INTERVAL,
+          totalProcessed: this.totalProcessed,
+          totalFailed: this.totalFailed
+        });
       }
     }, this.FLUSH_INTERVAL);
     
@@ -123,6 +190,22 @@ export class LogMemoryStore {
         error: error.message,
         logsCount: logsToProcess.length,
         timestamp: new Date().toISOString()
+      });
+      
+      // 에러 로그를 error.txt 파일에 기록
+      this.writeErrorLog(error, {
+        batchId,
+        logsCount: logsToProcess.length,
+        bufferSize: this.buffer.length,
+        totalProcessed: this.totalProcessed,
+        totalFailed: this.totalFailed,
+        operation: 'batchInsert',
+        sampleLogs: logsToProcess.slice(0, 3).map(log => ({
+          logId: log.logId,
+          type: log.type,
+          message: log.message?.slice(0, 100),
+          retryCount: log.retryCount
+        }))
       });
       
       // 실패한 로그들 처리
@@ -227,6 +310,25 @@ export class LogMemoryStore {
       filteredLogs = filteredLogs.filter(
         log => new Date(log.createdAt) <= new Date(filters.endDate)
       );
+    }
+    
+    // 새로운 필터들 추가
+    if (filters.userId) {
+      filteredLogs = filteredLogs.filter(log => 
+        log.metadata && 
+        log.metadata.user_id && 
+        String(log.metadata.user_id) === String(filters.userId)
+      );
+    }
+    
+    if (filters.metadata) {
+      filteredLogs = filteredLogs.filter(log => {
+        if (!log.metadata) return false;
+        
+        // metadata를 JSON 문자열로 변환하여 검색
+        const metadataStr = JSON.stringify(log.metadata).toLowerCase();
+        return metadataStr.includes(filters.metadata.toLowerCase());
+      });
     }
 
     // 페이지네이션 처리

@@ -119,6 +119,16 @@ router.post('/', async (req, res) => {
     
   } catch (error) {
     console.error('로그 저장 실패:', error);
+    
+    // 에러를 error.txt 파일에 기록
+    logMemoryStore.writeErrorLog(error, {
+      operation: 'singleLogSave',
+      requestBody: req.body,
+      userAgent: req.headers['user-agent'],
+      ip: req.ip,
+      timestamp: new Date().toISOString()
+    });
+    
     res.status(500).json({
       error: '로그 저장에 실패했습니다',
       message: error.message
@@ -229,6 +239,17 @@ router.post('/batch', async (req, res) => {
 
   } catch (error) {
     console.error('배치 로그 저장 실패:', error);
+    
+    // 에러를 error.txt 파일에 기록
+    logMemoryStore.writeErrorLog(error, {
+      operation: 'batchLogSave',
+      logsCount: req.body.logs ? req.body.logs.length : 0,
+      requestBody: req.body,
+      userAgent: req.headers['user-agent'],
+      ip: req.ip,
+      timestamp: new Date().toISOString()
+    });
+    
     res.status(500).json({
       error: '배치 로그 저장에 실패했습니다',
       message: error.message
@@ -276,6 +297,16 @@ router.post('/batch', async (req, res) => {
  *           format: date-time
  *         description: 종료 날짜 (ISO 8601 형식)
  *       - in: query
+ *         name: userId
+ *         schema:
+ *           type: string
+ *         description: 사용자 ID로 필터링 (metadata.user_id 검색)
+ *       - in: query
+ *         name: metadata
+ *         schema:
+ *           type: string
+ *         description: 메타데이터 내용으로 검색 (부분 일치)
+ *       - in: query
  *         name: page
  *         schema:
  *           type: integer
@@ -311,6 +342,8 @@ router.get('/', async (req, res) => {
       message: req.query.message || undefined,
       startDate: req.query.startDate ? new Date(req.query.startDate) : undefined,
       endDate: req.query.endDate ? new Date(req.query.endDate) : undefined,
+      userId: req.query.userId || undefined,
+      metadata: req.query.metadata || undefined,
       page: parseInt(req.query.page) || 1,
       limit: Math.min(parseInt(req.query.limit) || 50, 1000), // 최대 1000개 제한
       sortBy: req.query.sortBy || 'combined' // 'combined', 'memory', 'database'
