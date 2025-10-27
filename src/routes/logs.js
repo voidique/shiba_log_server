@@ -333,15 +333,51 @@ router.post('/batch', async (req, res) => {
  *       500:
  *         description: 서버 에러
  */
+// 날짜 범위 정규화 함수들 (단순화된 버전)
+const isDateOnlyString = (s) => typeof s === 'string' && /^\d{4}-\d{1,2}-\d{1,2}$/.test(s.trim());
+
+const normalizeDateRange = (startInput, endInput) => {
+  const hasStart = !!startInput;
+  const hasEnd = !!endInput;
+  
+  let startDate = undefined;
+  let endDate = undefined;
+  
+  // startDate 처리
+  if (hasStart) {
+    if (isDateOnlyString(startInput)) {
+      // YYYY-MM-DD 형식인 경우 해당 날짜의 시작 시간 (00:00:00.000)
+      startDate = new Date(startInput + 'T00:00:00.000');
+    } else {
+      // 다른 형식인 경우 그대로 파싱
+      startDate = new Date(startInput);
+    }
+  }
+  
+  // endDate 처리
+  if (hasEnd) {
+    if (isDateOnlyString(endInput)) {
+      // YYYY-MM-DD 형식인 경우 해당 날짜의 끝 시간 (23:59:59.999)
+      endDate = new Date(endInput + 'T23:59:59.999');
+    } else {
+      // 다른 형식인 경우 그대로 파싱
+      endDate = new Date(endInput);
+    }
+  }
+  
+  return { startDate, endDate };
+};
+
 // GET /api/logs - 로그 조회
 router.get('/', async (req, res) => {
   try {
+    const range = normalizeDateRange(req.query.startDate, req.query.endDate);
     const filters = {
       type: req.query.type || undefined,
       level: req.query.level || undefined,
       message: req.query.message || undefined,
-      startDate: req.query.startDate ? new Date(req.query.startDate) : undefined,
-      endDate: req.query.endDate ? new Date(req.query.endDate) : undefined,
+      startDate: range.startDate,
+      endDate: range.endDate,
       userId: req.query.userId || undefined,
       metadata: req.query.metadata || undefined,
       page: parseInt(req.query.page) || 1,
@@ -1188,4 +1224,4 @@ router.post('/system/repair', async (req, res) => {
   }
 });
 
-export default router; 
+export default router;
