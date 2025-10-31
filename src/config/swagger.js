@@ -20,7 +20,7 @@ const options = {
           type: 'apiKey',
           in: 'header',
           name: 'x-api-key',
-          description: 'API 키를 x-api-key 헤더에 포함시켜 주세요.'
+          description: 'API 키를 x-api-key 헤더에 포함시켜 주세요. 서버는 키 로테이션을 위해 SHIBA_LOG_API_KEY 또는 SHIBA_LOG_API_KEY2와 일치하는 키를 허용합니다.'
         }
       },
       schemas: {

@@ -107,9 +107,14 @@ async function startServer() {
       process.exit(1);
     }
     
-    if (!process.env.SHIBA_LOG_API_KEY) {
-      console.error('❌ SHIBA_LOG_API_KEY 환경변수가 설정되지 않았습니다');
+    const hasKey1 = !!process.env.SHIBA_LOG_API_KEY;
+    const hasKey2 = !!process.env.SHIBA_LOG_API_KEY2;
+    if (!hasKey1 && !hasKey2) {
+      console.error('❌ SHIBA_LOG_API_KEY 또는 SHIBA_LOG_API_KEY2 환경변수 중 하나는 설정되어야 합니다');
       process.exit(1);
+    }
+    if (hasKey1 && hasKey2) {
+      console.log('🔑 API 키 로테이션 모드 활성화 (KEY, KEY2 동시 허용)');
     }
 
     // 데이터베이스 연결 테스트

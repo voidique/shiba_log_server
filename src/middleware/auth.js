@@ -1,6 +1,10 @@
 export const validateApiKey = (req, res, next) => {
   // 기존 Next.js route.ts와 동일한 방식으로 검증
   const apiKey = req.headers['x-api-key'];
+  const validKeys = [
+    process.env.SHIBA_LOG_API_KEY,
+    process.env.SHIBA_LOG_API_KEY2
+  ].filter(Boolean);
   
   if (!apiKey) {
     return res.status(401).json({ 
@@ -9,8 +13,8 @@ export const validateApiKey = (req, res, next) => {
     });
   }
   
-  // 기존과 완전히 동일한 검증 로직
-  if (apiKey !== process.env.SHIBA_LOG_API_KEY) {
+  // 키 로테이션을 위해 두 개의 키를 허용
+  if (!validKeys.includes(apiKey)) {
     return res.status(401).json({ 
       error: '인증 실패',
       message: '유효하지 않은 API 키입니다' 
