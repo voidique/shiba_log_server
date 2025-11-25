@@ -432,6 +432,34 @@ export const batchInsert = async (logs) => {
 };
 
 // 로그 조회 함수
+// 대략적인 전체 행 개수 조회 (통계 정보 사용)
+const getEstimatedCount = async (tableName) => {
+  try {
+    // 파티션 테이블인 경우 모든 파티션의 추정치를 합산
+    if (USE_PARTITIONED_TABLE && tableName === PARTITIONED_TABLE_NAME) {
+      const result = await sql`
+        SELECT SUM(reltuples)::bigint as estimate
+        FROM pg_class
+        WHERE relname LIKE ${PARTITIONED_TABLE_NAME + '_%'}
+        AND relkind = 'r'
+      `;
+      return result[0].estimate || 0;
+    } else {
+      // 일반 테이블
+      const result = await sql`
+        SELECT reltuples::bigint as estimate
+        FROM pg_class
+        WHERE relname = ${tableName}
+      `;
+      return result[0].estimate || 0;
+    }
+  } catch (error) {
+    console.warn('⚠️ 추정치 조회 실패, 0 반환:', error.message);
+    return 0;
+  }
+};
+
+// 로그 조회 함수 (최적화됨)
 export const queryLogs = async (filters = {}) => {
   const {
     type,
@@ -449,67 +477,98 @@ export const queryLogs = async (filters = {}) => {
     const currentTable = getCurrentTableName();
     let conditions = [];
     let params = [];
+    let paramIndex = 1;
 
+    // 필터 조건 구성
     if (type) {
-      conditions.push('type = $' + (params.length + 1));
+      conditions.push(`type = $${paramIndex++}`);
       params.push(type);
     }
     if (level) {
-      conditions.push('level = $' + (params.length + 1));
+      conditions.push(`level = $${paramIndex++}`);
       params.push(level);
     }
     if (message) {
-      conditions.push('message ILIKE $' + (params.length + 1));
+      conditions.push(`message ILIKE $${paramIndex++}`);
       params.push(`%${message}%`);
     }
     if (startDate) {
-      conditions.push('created_at >= $' + (params.length + 1));
+      conditions.push(`created_at >= $${paramIndex++}`);
       params.push(startDate);
     }
     if (endDate) {
-      conditions.push('created_at <= $' + (params.length + 1));
+      conditions.push(`created_at <= $${paramIndex++}`);
       params.push(endDate);
     }
-    
-    // 새로운 필터들 추가
     if (userId) {
-      conditions.push('metadata->>\'user_id\' = $' + (params.length + 1));
+      conditions.push(`metadata->>'user_id' = $${paramIndex++}`);
       params.push(String(userId));
     }
-    
     if (metadata) {
-      conditions.push('metadata::text ILIKE $' + (params.length + 1));
+      conditions.push(`metadata::text ILIKE $${paramIndex++}`);
       params.push(`%${metadata}%`);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     
-    const query = `
-      WITH filtered_logs AS (
-        SELECT 
-          id,
-          timestamp,
-          created_at,
-          logged_at,
-          level,
-          type,
-          message,
-          metadata
-        FROM ${currentTable} ${whereClause}
-      )
+    // 1. 데이터 조회 쿼리 (LIMIT 적용으로 빠름)
+    // 인덱스를 타게 하기 위해 단순 조회로 변경
+    const dataQuery = sql.unsafe(`
       SELECT 
-        (SELECT COUNT(*) FROM filtered_logs) as total_count,
-        fl.*
-      FROM filtered_logs fl
+        id,
+        timestamp,
+        created_at,
+        logged_at,
+        level,
+        type,
+        message,
+        metadata
+      FROM ${currentTable}
+      ${whereClause}
       ORDER BY created_at DESC, logged_at DESC
-      LIMIT $${params.length + 1}
-      OFFSET $${params.length + 2}
-    `;
+      LIMIT $${paramIndex++}
+      OFFSET $${paramIndex++}
+    `, [...params, limit, offset]);
 
-    params.push(limit, offset);
+    // 2. 카운트 쿼리 (조건에 따라 최적화)
+    let countQuery;
     
-    const result = await sql.unsafe(query, params);
-    return result;
+    // 필터가 없는 경우: 통계 기반 추정치 사용 (초고속)
+    if (conditions.length === 0) {
+      countQuery = getEstimatedCount(currentTable);
+    } else {
+      // 필터가 있는 경우: 실제 카운트 (어쩔 수 없음, 하지만 데이터 쿼리와 병렬 실행)
+      // COUNT(*)는 인덱스만 스캔할 수 있도록 유도
+      countQuery = sql.unsafe(`
+        SELECT COUNT(*) as total_count
+        FROM ${currentTable}
+        ${whereClause}
+      `, params).then(res => res[0].total_count);
+    }
+
+    // 병렬 실행
+    const [rows, totalCount] = await Promise.all([dataQuery, countQuery]);
+
+    // 결과 포맷팅 (기존 포맷 유지)
+    // 첫 번째 행에 total_count를 포함시키는 기존 방식 호환성 유지
+    if (rows.length > 0) {
+      rows[0].total_count = totalCount;
+    } else if (offset === 0) {
+      // 데이터가 없지만 카운트는 보내야 하는 경우 (빈 배열 반환하되 호출자가 total을 알 수 없음)
+      // 기존 로직상 빈 배열을 반환하면 호출자가 total_count를 읽을 수 없으므로
+      // 빈 배열을 그대로 반환합니다. (호출자인 logs.js에서 처리)
+    }
+
+    // logs.js에서는 rows[0].total_count를 읽으므로, 
+    // rows가 비어있지 않으면 첫 객체에 total_count 주입
+    if (rows.length > 0) {
+      // postgres.js 결과 객체는 불변일 수 있으므로 복사
+      const firstRow = { ...rows[0], total_count: totalCount };
+      rows[0] = firstRow;
+    }
+
+    return rows;
+
   } catch (error) {
     console.error('❌ 로그 조회 실패:', error);
     throw error;
