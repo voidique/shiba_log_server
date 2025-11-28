@@ -132,7 +132,7 @@ Server Info:
     };
 
     this.buffer.push(logWithId);
-    console.log(`📝 로그 추가됨 [ID: ${logWithId.logId.slice(0, 8)}...] (생성시간: ${now.toISOString()}) (버퍼 크기: ${this.buffer.length}/${this.BATCH_SIZE})`);
+    // console.log(`📝 로그 추가됨 [ID: ${logWithId.logId.slice(0, 8)}...] (생성시간: ${now.toISOString()}) (버퍼 크기: ${this.buffer.length}/${this.BATCH_SIZE})`);
 
     // 배치 크기에 도달하면 즉시 처리
     if (this.buffer.length >= this.BATCH_SIZE) {

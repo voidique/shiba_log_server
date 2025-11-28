@@ -59,13 +59,6 @@ const runBackgroundOptimization = async () => {
     `;
     
     if (partitionTableExists.length > 0) {
-      // 1. 부모 테이블에 컬럼 추가 (모든 파티션에 자동 전파됨)
-      await sql.unsafe(`
-        ALTER TABLE ${PARTITIONED_TABLE_NAME} 
-        ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ,
-        ADD COLUMN IF NOT EXISTS logged_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-      `);
-      
       // 2. 부모 테이블 데이터 업데이트 (모든 파티션에 전파됨)
       await sql.unsafe(`
         UPDATE ${PARTITIONED_TABLE_NAME} 
@@ -155,6 +148,21 @@ export const addTimestampFields = async () => {
       ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS logged_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
     `);
+
+    // 파티션 테이블도 존재한다면 같은 작업 수행 (여기서 await하여 verifySystemHealth 통과 보장)
+    const partitionTableExists = await sql`
+      SELECT tablename FROM pg_tables 
+      WHERE tablename = ${PARTITIONED_TABLE_NAME} AND schemaname = 'public'
+    `;
+    
+    if (partitionTableExists.length > 0) {
+      await sql.unsafe(`
+        ALTER TABLE ${PARTITIONED_TABLE_NAME} 
+        ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS logged_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      `);
+      console.log('✅ 파티션 테이블 컬럼 추가 완료');
+    }
 
     // 무거운 인덱스 생성 및 데이터 마이그레이션은 백그라운드에서 실행
     // await 하지 않음으로써 서버 시작 시간을 단축
