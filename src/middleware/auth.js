@@ -29,6 +29,11 @@ export const logRequest = (req, res, next) => {
   const { method, url, ip } = req;
   const userAgent = req.headers['user-agent'] || 'Unknown';
   
+  // 헬스체크 및 로그 저장/배치 요청은 로깅 제외 (너무 시끄러움)
+  if (url.includes('/health') || url === '/api/logs' || url === '/api/logs/batch') {
+    return next();
+  }
+  
   console.log(`📡 [${timestamp}] ${method} ${url} - IP: ${ip} - UA: ${userAgent}`);
   next();
 };
