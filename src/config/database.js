@@ -611,6 +611,13 @@ export const queryLogs = async (filters = {}) => {
     
     // 1. 데이터 조회 쿼리 (LIMIT 적용으로 빠름)
     // 인덱스를 타게 하기 위해 단순 조회로 변경
+    // 검색 최적화: 메시지 검색 시에는 "Order By Limit" 함정을 피하기 위해 정렬 인덱스 사용을 억제
+    // (Postgres가 created_at 인덱스를 타고 스캔하다가 느려지는 것을 방지하고, GIN 인덱스를 강제 사용하게 함)
+    let orderByClause = 'ORDER BY created_at DESC, logged_at DESC';
+    if (message || metadata) {
+      orderByClause = "ORDER BY (created_at + INTERVAL '0 seconds') DESC, logged_at DESC";
+    }
+
     const dataQuery = sql.unsafe(`
       SELECT 
         id,
@@ -623,7 +630,7 @@ export const queryLogs = async (filters = {}) => {
         metadata
       FROM ${currentTable}
       ${whereClause}
-      ORDER BY created_at DESC, logged_at DESC
+      ${orderByClause}
       LIMIT $${paramIndex++}
       OFFSET $${paramIndex++}
     `, [...params, limit, offset]);
