@@ -635,19 +635,24 @@ export const queryLogs = async (filters = {}) => {
       OFFSET $${paramIndex++}
     `, [...params, limit, offset]);
 
-    // 2. 카운트 쿼리 (조건에 따라 최적화)
+    // 2. 카운트 쿼리 (성능을 위해 최대 10,000개까지만 카운트)
     let countQuery;
     
     // 필터가 없는 경우: 통계 기반 추정치 사용 (초고속)
     if (conditions.length === 0) {
       countQuery = getEstimatedCount(currentTable);
     } else {
-      // 필터가 있는 경우: 실제 카운트 (어쩔 수 없음, 하지만 데이터 쿼리와 병렬 실행)
-      // COUNT(*)는 인덱스만 스캔할 수 있도록 유도
+      // 필터가 있는 경우: Capped Count (최대 10,000개)
+      // 전체 개수를 세는 것은 대용량 데이터에서 매우 느리므로, 
+      // "10,000개 이상"인지만 확인하여 반응 속도를 보장함
       countQuery = sql.unsafe(`
         SELECT COUNT(*) as total_count
-        FROM ${currentTable}
-        ${whereClause}
+        FROM (
+          SELECT 1
+          FROM ${currentTable}
+          ${whereClause}
+          LIMIT 10000
+        ) as sub
       `, params).then(res => res[0].total_count);
     }
 
