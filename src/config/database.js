@@ -642,18 +642,42 @@ export const queryLogs = async (filters = {}) => {
     if (conditions.length === 0) {
       countQuery = getEstimatedCount(currentTable);
     } else {
-      // 필터가 있는 경우: Capped Count (최대 10,000개)
-      // 전체 개수를 세는 것은 대용량 데이터에서 매우 느리므로, 
-      // "10,000개 이상"인지만 확인하여 반응 속도를 보장함
-      countQuery = sql.unsafe(`
-        SELECT COUNT(*) as total_count
+      // 필터가 있는 경우: Hybrid Approach (1,000개까지 정확 + 그 이상은 EXPLAIN 추정)
+      // 1. 먼저 1,000개까지만 세어봄 (매우 빠름)
+      const exactCountLimit = 1000;
+      const exactCount = await sql.unsafe(`
+        SELECT COUNT(*) as count
         FROM (
           SELECT 1
           FROM ${currentTable}
           ${whereClause}
-          LIMIT 10000
+          LIMIT ${exactCountLimit}
         ) as sub
-      `, params).then(res => res[0].total_count);
+      `, params).then(res => parseInt(res[0].count));
+
+      if (exactCount < exactCountLimit) {
+        // 1,000개 미만이면 정확한 개수 반환
+        countQuery = Promise.resolve(exactCount);
+      } else {
+        // 1,000개 이상이면 EXPLAIN을 사용하여 전체 개수 추정 (0ms)
+        // EXPLAIN 결과에서 rows=N 부분을 파싱
+        countQuery = sql.unsafe(`
+          EXPLAIN (FORMAT JSON)
+          SELECT *
+          FROM ${currentTable}
+          ${whereClause}
+        `, params).then(res => {
+          try {
+            const plan = res[0]['QUERY PLAN'][0]['Plan'];
+            const estimatedRows = plan['Plan Rows'];
+            // 추정치가 1,000보다 작게 나올 수도 있으므로 보정
+            return Math.max(exactCountLimit, estimatedRows);
+          } catch (e) {
+            console.warn('EXPLAIN 파싱 실패, 기본값 반환', e);
+            return exactCountLimit;
+          }
+        });
+      }
     }
 
     // 병렬 실행
