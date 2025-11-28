@@ -21,27 +21,24 @@ export const getCurrentTableName = () => {
   return USE_PARTITIONED_TABLE ? PARTITIONED_TABLE_NAME : LEGACY_TABLE_NAME;
 };
 
-// 테이블에 새로운 시간 필드 추가 (created_at, logged_at)
-export const addTimestampFields = async () => {
+// 백그라운드에서 인덱스 생성 및 데이터 마이그레이션 수행
+const runBackgroundOptimization = async () => {
+  console.log('⏳ 백그라운드 최적화 작업 시작...');
+  
   try {
-    console.log('🕒 테이블에 새로운 시간 필드 추가 중...');
-    
-    // 기존 테이블에 새 필드 추가
-    await sql.unsafe(`
-      ALTER TABLE ${LEGACY_TABLE_NAME} 
-      ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ,
-      ADD COLUMN IF NOT EXISTS logged_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-    `);
+    // pg_trgm 확장 기능 활성화 (텍스트 검색 최적화)
+    await sql.unsafe(`CREATE EXTENSION IF NOT EXISTS pg_trgm`);
+    console.log('✅ pg_trgm 확장 기능 활성화 시도 완료');
 
-    // Native FTS 인덱스 추가 (전문 검색 최적화)
-    // 'simple' 사전을 사용하여 형태소 분석 없이 단어 그대로 인덱싱
+    // GIN 인덱스 추가 (메시지 검색 최적화) - CONCURRENTLY 사용
+    // CONCURRENTLY: 테이블 잠금을 방지하여 운영 중에도 인덱스 생성 가능
     await sql.unsafe(`
-      CREATE INDEX IF NOT EXISTS idx_${LEGACY_TABLE_NAME}_message_fts ON ${LEGACY_TABLE_NAME} USING GIN (to_tsvector('simple', message))
+      CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${LEGACY_TABLE_NAME}_message_trgm ON ${LEGACY_TABLE_NAME} USING GIN (message gin_trgm_ops)
     `);
     
     // 복합 인덱스 추가 (필터링 최적화)
     await sql.unsafe(`
-      CREATE INDEX IF NOT EXISTS idx_${LEGACY_TABLE_NAME}_type_level ON ${LEGACY_TABLE_NAME}(type, level)
+      CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${LEGACY_TABLE_NAME}_type_level ON ${LEGACY_TABLE_NAME}(type, level)
     `);
     
     // 기존 데이터의 created_at을 timestamp 값으로 설정 (null인 경우만)
@@ -64,14 +61,14 @@ export const addTimestampFields = async () => {
         ADD COLUMN IF NOT EXISTS logged_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       `);
       
-      // 파티션 테이블에도 Native FTS 인덱스 추가
+      // 파티션 테이블에도 GIN 인덱스 추가
       await sql.unsafe(`
-        CREATE INDEX IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_message_fts ON ${PARTITIONED_TABLE_NAME} USING GIN (to_tsvector('simple', message))
+        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_message_trgm ON ${PARTITIONED_TABLE_NAME} USING GIN (message gin_trgm_ops)
       `);
       
       // 파티션 테이블에도 복합 인덱스 추가
       await sql.unsafe(`
-        CREATE INDEX IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_type_level ON ${PARTITIONED_TABLE_NAME}(type, level)
+        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_type_level ON ${PARTITIONED_TABLE_NAME}(type, level)
       `);
       
       await sql.unsafe(`
@@ -85,23 +82,43 @@ export const addTimestampFields = async () => {
     
     // 새 필드들에 인덱스 추가
     await sql.unsafe(`
-      CREATE INDEX IF NOT EXISTS idx_${LEGACY_TABLE_NAME}_created_at ON ${LEGACY_TABLE_NAME}(created_at)
+      CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${LEGACY_TABLE_NAME}_created_at ON ${LEGACY_TABLE_NAME}(created_at)
     `);
     await sql.unsafe(`
-      CREATE INDEX IF NOT EXISTS idx_${LEGACY_TABLE_NAME}_logged_at ON ${LEGACY_TABLE_NAME}(logged_at)
+      CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${LEGACY_TABLE_NAME}_logged_at ON ${LEGACY_TABLE_NAME}(logged_at)
     `);
     
     if (partitionTableExists.length > 0) {
       await sql.unsafe(`
-        CREATE INDEX IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_created_at ON ${PARTITIONED_TABLE_NAME}(created_at)
+        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_created_at ON ${PARTITIONED_TABLE_NAME}(created_at)
       `);
       await sql.unsafe(`
-        CREATE INDEX IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_logged_at ON ${PARTITIONED_TABLE_NAME}(logged_at)
+        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_logged_at ON ${PARTITIONED_TABLE_NAME}(logged_at)
       `);
     }
     
-    console.log('✅ 새로운 시간 필드 및 인덱스 추가 완료');
-    console.log('📝 created_at: 로그 생성 시간, logged_at: 실제 DB 저장 시간');
+    console.log('✅ 백그라운드 인덱스 작업 완료 (검색 성능 최적화됨)');
+    
+  } catch (error) {
+    console.error('❌ 백그라운드 최적화 작업 중 에러 (서버 동작에는 영향 없음):', error.message);
+  }
+};
+
+// 테이블에 새로운 시간 필드 추가 (created_at, logged_at)
+export const addTimestampFields = async () => {
+  try {
+    console.log('🕒 테이블 스키마 확인 중...');
+    
+    // 기존 테이블에 새 필드 추가 (가벼운 작업만 await)
+    await sql.unsafe(`
+      ALTER TABLE ${LEGACY_TABLE_NAME} 
+      ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS logged_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    `);
+
+    // 무거운 인덱스 생성 및 데이터 마이그레이션은 백그라운드에서 실행
+    // await 하지 않음으로써 서버 시작 시간을 단축
+    runBackgroundOptimization();
     
   } catch (error) {
     console.error('❌ 시간 필드 추가 실패:', error);
@@ -142,14 +159,14 @@ export const migrateAllPartitions = async () => {
           ADD COLUMN IF NOT EXISTS logged_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         `);
         
-        // 개별 파티션에 Native FTS 인덱스 추가
+        // 개별 파티션에 GIN 인덱스 추가 (CONCURRENTLY)
         await sql.unsafe(`
-          CREATE INDEX IF NOT EXISTS idx_${tableName}_message_fts ON ${tableName} USING GIN (to_tsvector('simple', message))
+          CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${tableName}_message_trgm ON ${tableName} USING GIN (message gin_trgm_ops)
         `);
         
-        // 개별 파티션에 복합 인덱스 추가
+        // 개별 파티션에 복합 인덱스 추가 (CONCURRENTLY)
         await sql.unsafe(`
-          CREATE INDEX IF NOT EXISTS idx_${tableName}_type_level ON ${tableName}(type, level)
+          CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${tableName}_type_level ON ${tableName}(type, level)
         `);
         
         // 기존 데이터의 created_at을 timestamp 값으로 설정
@@ -159,12 +176,12 @@ export const migrateAllPartitions = async () => {
           WHERE created_at IS NULL
         `);
         
-        // 인덱스 추가
+        // 인덱스 추가 (CONCURRENTLY)
         await sql.unsafe(`
-          CREATE INDEX IF NOT EXISTS idx_${tableName}_created_at ON ${tableName}(created_at)
+          CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${tableName}_created_at ON ${tableName}(created_at)
         `);
         await sql.unsafe(`
-          CREATE INDEX IF NOT EXISTS idx_${tableName}_logged_at ON ${tableName}(logged_at)
+          CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${tableName}_logged_at ON ${tableName}(logged_at)
         `);
         
         console.log(`✅ ${tableName} 마이그레이션 완료`);
@@ -520,9 +537,8 @@ export const queryLogs = async (filters = {}) => {
       params.push(level);
     }
     if (message) {
-      // Native FTS 검색 (websearch_to_tsquery 사용)
-      conditions.push(`to_tsvector('simple', message) @@ websearch_to_tsquery('simple', $${paramIndex++})`);
-      params.push(message);
+      conditions.push(`message ILIKE $${paramIndex++}`);
+      params.push(`%${message}%`);
     }
     if (startDate) {
       conditions.push(`created_at >= $${paramIndex++}`);
