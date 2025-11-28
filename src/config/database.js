@@ -32,6 +32,17 @@ export const addTimestampFields = async () => {
       ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS logged_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
     `);
+
+    // Native FTS 인덱스 추가 (전문 검색 최적화)
+    // 'simple' 사전을 사용하여 형태소 분석 없이 단어 그대로 인덱싱
+    await sql.unsafe(`
+      CREATE INDEX IF NOT EXISTS idx_${LEGACY_TABLE_NAME}_message_fts ON ${LEGACY_TABLE_NAME} USING GIN (to_tsvector('simple', message))
+    `);
+    
+    // 복합 인덱스 추가 (필터링 최적화)
+    await sql.unsafe(`
+      CREATE INDEX IF NOT EXISTS idx_${LEGACY_TABLE_NAME}_type_level ON ${LEGACY_TABLE_NAME}(type, level)
+    `);
     
     // 기존 데이터의 created_at을 timestamp 값으로 설정 (null인 경우만)
     await sql.unsafe(`
@@ -51,6 +62,16 @@ export const addTimestampFields = async () => {
         ALTER TABLE ${PARTITIONED_TABLE_NAME} 
         ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ,
         ADD COLUMN IF NOT EXISTS logged_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      `);
+      
+      // 파티션 테이블에도 Native FTS 인덱스 추가
+      await sql.unsafe(`
+        CREATE INDEX IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_message_fts ON ${PARTITIONED_TABLE_NAME} USING GIN (to_tsvector('simple', message))
+      `);
+      
+      // 파티션 테이블에도 복합 인덱스 추가
+      await sql.unsafe(`
+        CREATE INDEX IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_type_level ON ${PARTITIONED_TABLE_NAME}(type, level)
       `);
       
       await sql.unsafe(`
@@ -119,6 +140,16 @@ export const migrateAllPartitions = async () => {
           ALTER TABLE ${tableName} 
           ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ,
           ADD COLUMN IF NOT EXISTS logged_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+        `);
+        
+        // 개별 파티션에 Native FTS 인덱스 추가
+        await sql.unsafe(`
+          CREATE INDEX IF NOT EXISTS idx_${tableName}_message_fts ON ${tableName} USING GIN (to_tsvector('simple', message))
+        `);
+        
+        // 개별 파티션에 복합 인덱스 추가
+        await sql.unsafe(`
+          CREATE INDEX IF NOT EXISTS idx_${tableName}_type_level ON ${tableName}(type, level)
         `);
         
         // 기존 데이터의 created_at을 timestamp 값으로 설정
@@ -489,8 +520,9 @@ export const queryLogs = async (filters = {}) => {
       params.push(level);
     }
     if (message) {
-      conditions.push(`message ILIKE $${paramIndex++}`);
-      params.push(`%${message}%`);
+      // Native FTS 검색 (websearch_to_tsquery 사용)
+      conditions.push(`to_tsvector('simple', message) @@ websearch_to_tsquery('simple', $${paramIndex++})`);
+      params.push(message);
     }
     if (startDate) {
       conditions.push(`created_at >= $${paramIndex++}`);
