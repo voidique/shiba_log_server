@@ -81,20 +81,47 @@ const runBackgroundOptimization = async () => {
       for (const partition of partitions) {
         const pName = partition.tablename;
         
-        // GIN 인덱스
+        // 유효하지 않은 인덱스 확인 및 삭제 함수
+        const dropInvalidIndex = async (indexName) => {
+          const invalidIndex = await sql`
+            SELECT indexrelid 
+            FROM pg_index i
+            JOIN pg_class c ON i.indexrelid = c.oid
+            WHERE c.relname = ${indexName} AND i.indisvalid = false
+          `;
+          
+          if (invalidIndex.length > 0) {
+            console.log(`🗑️ 유효하지 않은 인덱스 발견 및 삭제: ${indexName}`);
+            await sql.unsafe(`DROP INDEX CONCURRENTLY IF EXISTS ${indexName}`);
+          }
+        };
+
+        // 각 인덱스에 대해 유효성 검사 후 생성
+        const indexNames = {
+          trgm: `idx_${pName}_message_trgm`,
+          type_level: `idx_${pName}_type_level`,
+          created_at: `idx_${pName}_created_at`,
+          logged_at: `idx_${pName}_logged_at`
+        };
+
+        await dropInvalidIndex(indexNames.trgm);
         await sql.unsafe(`
-          CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${pName}_message_trgm ON ${pName} USING GIN (message gin_trgm_ops)
+          CREATE INDEX CONCURRENTLY IF NOT EXISTS ${indexNames.trgm} ON ${pName} USING GIN (message gin_trgm_ops)
         `);
-        // 복합 인덱스
+
+        await dropInvalidIndex(indexNames.type_level);
         await sql.unsafe(`
-          CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${pName}_type_level ON ${pName}(type, level)
+          CREATE INDEX CONCURRENTLY IF NOT EXISTS ${indexNames.type_level} ON ${pName}(type, level)
         `);
-        // 시간 인덱스
+
+        await dropInvalidIndex(indexNames.created_at);
         await sql.unsafe(`
-          CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${pName}_created_at ON ${pName}(created_at)
+          CREATE INDEX CONCURRENTLY IF NOT EXISTS ${indexNames.created_at} ON ${pName}(created_at)
         `);
+
+        await dropInvalidIndex(indexNames.logged_at);
         await sql.unsafe(`
-          CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${pName}_logged_at ON ${pName}(logged_at)
+          CREATE INDEX CONCURRENTLY IF NOT EXISTS ${indexNames.logged_at} ON ${pName}(logged_at)
         `);
       }
       
