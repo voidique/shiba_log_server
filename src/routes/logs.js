@@ -372,6 +372,18 @@ const normalizeDateRange = (startInput, endInput) => {
 router.get('/', async (req, res) => {
   try {
     const range = normalizeDateRange(req.query.startDate, req.query.endDate);
+    // 검색어는 있는데 날짜가 없으면 -> 최근 7일로 제한 (속도 최적화)
+    // 전체 기간을 대상으로 검색+정렬하면 수백만 건을 정렬해야 해서 느림 (4초 이상)
+    // 사용자가 명시적으로 날짜를 지정하지 않았다면, 최근 로그를 본다고 가정하고 범위를 좁힘
+    let isImplicitDateRange = false;
+    if ((req.query.message || req.query.metadata) && !range.startDate) {
+      const sevenDaysAgo = new Date();
+      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+      sevenDaysAgo.setHours(0, 0, 0, 0);
+      range.startDate = sevenDaysAgo;
+      isImplicitDateRange = true;
+    }
+
     const filters = {
       type: req.query.type || undefined,
       level: req.query.level || undefined,
@@ -447,15 +459,16 @@ router.get('/', async (req, res) => {
         memory: memoryResult,
         database: dbResult,
         // 메타 정보
-        meta: {
-          query: filters,
-          timestamp: new Date().toISOString(),
-          explanation: {
-            created_at: '로그가 생성된 시간 (클라이언트 요청 시간)',
-            logged_at: '로그가 DB에 실제 저장된 시간',
-            source: 'memory: 아직 처리되지 않은 버퍼 로그, database: 이미 저장된 로그'
+          meta: {
+            query: filters,
+            isImplicitDateRange, // 클라이언트가 알 수 있게 플래그 추가
+            timestamp: new Date().toISOString(),
+            explanation: {
+              created_at: '로그가 생성된 시간 (클라이언트 요청 시간)',
+              logged_at: '로그가 DB에 실제 저장된 시간',
+              source: 'memory: 아직 처리되지 않은 버퍼 로그, database: 이미 저장된 로그'
+            }
           }
-        }
       }
     };
 
