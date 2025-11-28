@@ -55,46 +55,50 @@ const runBackgroundOptimization = async () => {
     `;
     
     if (partitionTableExists.length > 0) {
+      // 1. 부모 테이블에 컬럼 추가 (모든 파티션에 자동 전파됨)
       await sql.unsafe(`
         ALTER TABLE ${PARTITIONED_TABLE_NAME} 
         ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ,
         ADD COLUMN IF NOT EXISTS logged_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       `);
       
-      // 파티션 테이블에도 GIN 인덱스 추가
-      await sql.unsafe(`
-        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_message_trgm ON ${PARTITIONED_TABLE_NAME} USING GIN (message gin_trgm_ops)
-      `);
-      
-      // 파티션 테이블에도 복합 인덱스 추가
-      await sql.unsafe(`
-        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_type_level ON ${PARTITIONED_TABLE_NAME}(type, level)
-      `);
-      
+      // 2. 부모 테이블 데이터 업데이트 (모든 파티션에 전파됨)
       await sql.unsafe(`
         UPDATE ${PARTITIONED_TABLE_NAME} 
         SET created_at = timestamp 
         WHERE created_at IS NULL
       `);
       
-      console.log('✅ 파티션 테이블에도 새 시간 필드 추가 완료');
-    }
-    
-    // 새 필드들에 인덱스 추가
-    await sql.unsafe(`
-      CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${LEGACY_TABLE_NAME}_created_at ON ${LEGACY_TABLE_NAME}(created_at)
-    `);
-    await sql.unsafe(`
-      CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${LEGACY_TABLE_NAME}_logged_at ON ${LEGACY_TABLE_NAME}(logged_at)
-    `);
-    
-    if (partitionTableExists.length > 0) {
-      await sql.unsafe(`
-        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_created_at ON ${PARTITIONED_TABLE_NAME}(created_at)
-      `);
-      await sql.unsafe(`
-        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${PARTITIONED_TABLE_NAME}_logged_at ON ${PARTITIONED_TABLE_NAME}(logged_at)
-      `);
+      // 3. 개별 파티션에 인덱스 생성 (부모 테이블에는 CONCURRENTLY 불가)
+      // 모든 파티션을 조회하여 인덱스 생성
+      const partitions = await sql`
+        SELECT tablename 
+        FROM pg_tables 
+        WHERE tablename ~ ${`^${PARTITIONED_TABLE_NAME}_[0-9]{4}_[0-9]{2}$`}
+        AND schemaname = 'public'
+      `;
+      
+      for (const partition of partitions) {
+        const pName = partition.tablename;
+        
+        // GIN 인덱스
+        await sql.unsafe(`
+          CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${pName}_message_trgm ON ${pName} USING GIN (message gin_trgm_ops)
+        `);
+        // 복합 인덱스
+        await sql.unsafe(`
+          CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${pName}_type_level ON ${pName}(type, level)
+        `);
+        // 시간 인덱스
+        await sql.unsafe(`
+          CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${pName}_created_at ON ${pName}(created_at)
+        `);
+        await sql.unsafe(`
+          CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_${pName}_logged_at ON ${pName}(logged_at)
+        `);
+      }
+      
+      console.log('✅ 파티션 테이블 작업 완료 (컬럼 추가 및 인덱스 생성)');
     }
     
     console.log('✅ 백그라운드 인덱스 작업 완료 (검색 성능 최적화됨)');
@@ -152,12 +156,14 @@ export const migrateAllPartitions = async () => {
       console.log(`🔧 파티션 마이그레이션 중: ${tableName}`);
       
       try {
-        // 각 파티션에 새 컬럼 추가
+        // 각 파티션에 새 컬럼 추가 - 제거됨 (부모 테이블에서 상속받음)
+        /* 
         await sql.unsafe(`
           ALTER TABLE ${tableName} 
           ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ,
           ADD COLUMN IF NOT EXISTS logged_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         `);
+        */
         
         // 개별 파티션에 GIN 인덱스 추가 (CONCURRENTLY)
         await sql.unsafe(`
