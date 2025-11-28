@@ -23,7 +23,11 @@ export const getCurrentTableName = () => {
 
 // 백그라운드에서 인덱스 생성 및 데이터 마이그레이션 수행
 const runBackgroundOptimization = async () => {
-  console.log('⏳ 백그라운드 최적화 작업 시작...');
+  console.log('\n================================================================');
+  console.log('⏳ [Background] 백그라운드 최적화 작업 시작...');
+  console.log('   - 이 작업은 서버 동작과 별개로 백그라운드에서 실행됩니다.');
+  console.log('   - 데이터 양에 따라 수 분에서 수십 분이 소요될 수 있습니다.');
+  console.log('================================================================\n');
   
   try {
     // pg_trgm 확장 기능 활성화 (텍스트 검색 최적화)
@@ -128,10 +132,15 @@ const runBackgroundOptimization = async () => {
       console.log('✅ 파티션 테이블 작업 완료 (컬럼 추가 및 인덱스 생성)');
     }
     
-    console.log('✅ 백그라운드 인덱스 작업 완료 (검색 성능 최적화됨)');
+    console.log('\n================================================================');
+    console.log('✅ [Background] 백그라운드 인덱스 작업 완료!');
+    console.log('   - 이제 검색 성능이 최적화되었습니다.');
+    console.log('================================================================\n');
     
   } catch (error) {
-    console.error('❌ 백그라운드 최적화 작업 중 에러 (서버 동작에는 영향 없음):', error.message);
+    console.error('\n❌ [Background] 백그라운드 최적화 작업 중 에러:', error.message);
+    console.error('   - 서버 동작에는 영향이 없으나, 검색 성능이 저하될 수 있습니다.');
+    console.error('   - 에러 상세:', error);
   }
 };
 
@@ -504,7 +513,7 @@ export const batchInsert = async (logs) => {
       results.push(res)
     }
 
-    console.log(`✅ 로그 ${logs.length}개 저장 완료 (개별 INSERT)`)
+    // console.log(`✅ 로그 ${logs.length}개 저장 완료 (개별 INSERT)`) - 너무 시끄러워서 주석 처리
     return results
   } catch (error) {
     console.error('❌ 로그 저장 실패:', error)
