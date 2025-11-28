@@ -285,9 +285,10 @@ export const createPartitionTable = async () => {
     console.log('📅 월별 파티션 생성을 시작합니다...');
     await createInitialPartitions();
     
-    // 모든 기존 파티션 테이블 마이그레이션
-    console.log('🔄 기존 파티션 테이블 마이그레이션 시작...');
-    await migrateAllPartitions();
+    // 모든 기존 파티션 테이블 마이그레이션 (백그라운드 실행)
+    console.log('🔄 파티션 테이블 마이그레이션 및 인덱스 생성을 백그라운드에서 시작합니다...');
+    runBackgroundOptimization();
+    // await migrateAllPartitions(); // 블로킹 방지
 
   } catch (error) {
     console.error('❌ 파티션 테이블 생성 실패:', error);
