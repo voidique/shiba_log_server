@@ -339,7 +339,11 @@ Server Info:
 
     // created_at 기준으로 정렬하고, 메모리 로그 표시 추가
     const sortedLogs = filteredLogs
-      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      .sort((a, b) => {
+        const timeA = new Date(a.createdAt);
+        const timeB = new Date(b.createdAt);
+        return filters.reverse ? timeA - timeB : timeB - timeA;
+      })
       .slice(offset, offset + limit)
       .map(log => ({
         ...log,
@@ -357,7 +361,7 @@ Server Info:
   }
 
   // DB 결과와 메모리 결과를 시간순으로 통합 정렬하는 새로운 메서드
-  mergeAndSortLogs(memoryLogs = [], dbLogs = [], limit = 50) {
+  mergeAndSortLogs(memoryLogs = [], dbLogs = [], limit = 50, reverse = false) {
     try {
       const allLogs = [];
       
@@ -391,7 +395,7 @@ Server Info:
         });
       }
       
-      // created_at 기준으로 최신순 정렬
+      // created_at 기준으로 정렬
       const sortedLogs = allLogs.sort((a, b) => {
         try {
           const timeA = new Date(a.created_at || a.timestamp);
@@ -406,7 +410,7 @@ Server Info:
             return 0;
           }
           
-          return timeB - timeA;
+          return reverse ? timeA - timeB : timeB - timeA;
         } catch (error) {
           console.warn('⚠️ 로그 정렬 중 에러:', error.message);
           return 0;
@@ -416,7 +420,7 @@ Server Info:
       // 제한된 개수만 반환
       const result = sortedLogs.slice(0, Math.max(1, Math.min(limit, 1000)));
       
-      console.log(`📊 통합 정렬 완료: 메모리 ${memoryLogs.length}개 + DB ${dbLogs.length}개 → ${result.length}개 반환`);
+      console.log(`📊 통합 정렬 완료: 메모리 ${memoryLogs.length}개 + DB ${dbLogs.length}개 → ${result.length}개 반환 (Reverse: ${reverse})`);
       return result;
       
     } catch (error) {

@@ -568,7 +568,8 @@ export const queryLogs = async (filters = {}) => {
     userId,
     metadata,
     limit = 50,
-    offset = 0
+    offset = 0,
+    reverse = false
   } = filters;
 
   try {
@@ -615,7 +616,11 @@ export const queryLogs = async (filters = {}) => {
     // (Postgres가 created_at 인덱스를 타고 스캔하다가 느려지는 것을 방지하고, GIN 인덱스를 강제 사용하게 함)
     // -> 2025-11-29: Capped Count 적용 후, 이 쿼리 힌트가 오히려 흔한 검색어(common terms)에서 
     // 전체 정렬을 유발하여 느려지는 원인이 될 수 있음. ANALYZE가 수행되었으므로 플래너를 믿고 제거.
-    let orderByClause = 'ORDER BY created_at DESC, logged_at DESC';
+    
+    // reverse 옵션에 따른 정렬 방향 결정
+    const sortDirection = reverse ? 'ASC' : 'DESC';
+    let orderByClause = `ORDER BY created_at ${sortDirection}, logged_at ${sortDirection}`;
+    
     // if (message || metadata) {
     //   orderByClause = "ORDER BY (created_at + INTERVAL '0 seconds') DESC, logged_at DESC";
     // }

@@ -307,6 +307,12 @@ router.post('/batch', async (req, res) => {
  *           type: string
  *         description: 메타데이터 내용으로 검색 (부분 일치)
  *       - in: query
+ *         name: reverse
+ *         schema:
+ *           type: boolean
+ *           default: false
+ *         description: 정렬 순서 반전 (true: 과거순, false: 최신순)
+ *       - in: query
  *         name: page
  *         schema:
  *           type: integer
@@ -394,7 +400,8 @@ router.get('/', async (req, res) => {
       metadata: req.query.metadata || undefined,
       page: parseInt(req.query.page) || 1,
       limit: Math.min(parseInt(req.query.limit) || 50, 1000), // 최대 1000개 제한
-      sortBy: req.query.sortBy || 'combined' // 'combined', 'memory', 'database'
+      sortBy: req.query.sortBy || 'combined', // 'combined', 'memory', 'database'
+      reverse: req.query.reverse === 'true' // 정렬 순서 반전
     };
 
     // 메모리에서 로그 조회 (버퍼된 로그들)
@@ -439,7 +446,8 @@ router.get('/', async (req, res) => {
       combinedLogs = logMemoryStore.mergeAndSortLogs(
         memoryLogs, 
         dbLogs, 
-        filters.limit
+        filters.limit,
+        filters.reverse
       );
     }
 
